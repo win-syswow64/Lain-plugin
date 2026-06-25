@@ -33,12 +33,18 @@ export default class adapterQQBot {
     /** 群消息 */
     this.sdk.on('message.group', async (data) => {
       data = await this.message(data, true)
-      if (data) Bot.emit('message', data)
+      if (data) {
+        await Bot.emit('message.group', data)
+        await Bot.emit('message', data)
+      }
     })
     /** 私聊消息 */
     this.sdk.on('message.private.friend', async (data) => {
       data = await this.message(data)
-      if (data) Bot.emit('message', data)
+      if (data) {
+        await Bot.emit('message.private', data)
+        await Bot.emit('message', data)
+      }
     })
 
     /** 按钮交互事件（回调/表单） */
@@ -224,7 +230,20 @@ export default class adapterQQBot {
   /** 转换格式给云崽处理 */
   async message(data, isGroup) {
     let { self_id: tinyId, ...e } = data
+    const rawGroupId = e.group_openid || e.group_id
+    const rawUserId = e.user_id
+    const rawAuthorId = e.author?.id
+    const senderOpenid = this.getMessageUserOpenid(e)
+    const senderMemberOpenid = this.getMessageMemberOpenid(e)
+    const rawSender = {
+      user_id: rawUserId,
+      author_id: rawAuthorId,
+      user_openid: e.author?.user_openid || e.sender?.user_openid || '',
+      member_openid: senderMemberOpenid,
+      group_openid: e.group_openid || rawGroupId || ''
+    }
     e.data = data
+    e.post_type = 'message'
     e.uin = this.id // ???鬼知道哪来的这玩意，icqq都没有...
     e.tiny_id = tinyId
     e.time = data.timestamp
@@ -294,25 +313,34 @@ export default class adapterQQBot {
         if (!Bot[e.self_id].gl.get(groupId)) Bot[e.self_id].gl.set(groupId, { group_id: groupId })
         /** 缓存群列表 */
         if (await redis.get(`lain:gl:${e.self_id}:${groupId}`)) redis.set(`lain:gl:${e.self_id}:${groupId}`, JSON.stringify({ group_id: groupId, uin: this.id }))
-        /** 防倒卖崽 */
-        if (Bot.lain.cfg.QQBotTips) await this.QQBotTips(data, groupId)
       } catch { }
 
       e.member = this.member(e.group_id, e.user_id)
       e.group_name = `${this.id}-${e.group_id}`
       e.group = this.pickGroup(e.group_id)
+      e.message_type = 'group'
+      e.sub_type = 'normal'
     } else {
       e.friend = this.pickFriend(e.user_id)
+      e.message_type = 'private'
+      e.sub_type = 'friend'
     }
 
     /** 添加适配器标识 */
     e.adapter = 'QQBot'
-    e.user_id = `${this.id}-${e.user_id}`
-    e.group_id = `${this.id}-${e.group_id}`
-    e.author.id = `${this.id}-${e.author.id}`
+    e.user_id = this.formatQQBotId(senderOpenid)
+    e.group_id = isGroup ? this.formatQQBotId(rawGroupId) : undefined
+    if (e.author?.id) e.author.id = this.formatQQBotId(e.author.id)
+    e.user_openid = senderOpenid
+    e.member_openid = senderMemberOpenid
+    e.group_openid = rawGroupId || ''
+    e.raw_sender = rawSender
     e.sender.user_id = e.user_id
+    e.sender.user_openid = senderOpenid
+    e.sender.member_openid = senderMemberOpenid
+    e.sender.group_openid = rawGroupId
     /** 为什么本体会从群名片拿uid啊? */ /** 自动绑定，神奇吧 */
-    e.sender.card = e.sender.user_openid
+    e.sender.card = senderMemberOpenid || senderOpenid
     e.sender.nickname = e.user_id
 
     /** 缓存好友列表 */
@@ -331,6 +359,7 @@ export default class adapterQQBot {
     const message = Array.isArray(e.message) ? e.message : []
     const cleanId = id => String(id ?? '').replace(/^qg_/, '').split('-').pop()
     const selfIds = new Set([cleanId(this.id), cleanId(tinyId), cleanId(e.tiny_id)].filter(Boolean))
+    const isGroupAtEvent = String(e.event_id || '').startsWith('GROUP_AT_MESSAGE_CREATE:')
 
     e.atme = message.some(i => {
       if (i?.type !== 'at') return false
@@ -344,9 +373,27 @@ export default class adapterQQBot {
       .trim()
 
     let msg = text || String(e.msg || e.raw_message || '').trim()
+    const leadingMention = msg.match(/^<@!?([^>]+)>\s*/)
+    if (!e.atme && leadingMention) {
+      e.atme = isGroupAtEvent || selfIds.has(cleanId(leadingMention[1]))
+    }
     if (e.atme) msg = msg.replace(/^<@!?.+?>\s*/, '').trim()
-    e.msg = msg
-    if (e.atme && msg) e.raw_message = msg
+    if (msg) e.raw_message = msg
+    delete e.msg
+  }
+
+  getMessageUserOpenid(e) {
+    return String(e.author?.member_openid || e.sender?.member_openid || e.sender?.user_openid || e.user_id || e.author?.id || '').trim()
+  }
+
+  getMessageMemberOpenid(e) {
+    return String(e.author?.member_openid || e.sender?.member_openid || e.sender?.user_openid || e.user_id || '').trim()
+  }
+
+  formatQQBotId(id) {
+    const text = String(id ?? '').trim()
+    if (!text) return undefined
+    return text.startsWith(`${this.id}-`) ? text : `${this.id}-${text.split('-').pop()}`
   }
 
   /** 前缀处理 */
@@ -393,24 +440,6 @@ export default class adapterQQBot {
     })
     return logMessage.join('')
   }
-
-  /** 小兔崽子 */
-  async QQBotTips(data, groupId) {
-    /** 首次进群后，推送防司马崽声明~ */
-    if (!await redis.get(`lain:QQBot:tips:${groupId}`)) {
-      const msg = []
-      const name = `「${Bot[this.id].nickname}」`
-      msg.push('温馨提示：')
-      msg.push(`感谢使用${name}，本Bot完全开源免费~\n`)
-      msg.push('请各位尊重Yunzai本体及其插件开发者们的努力~')
-      msg.push('如果本Bot是付费入群,请立刻退款举报！！！\n')
-      msg.push('来自：Lain-plugin防倒卖崽提示，本提示仅在首次入群后触发~')
-      if (Bot.lain.cfg.QQBotGroupId) msg.push(`\n如有疑问，请添加${name}官方群: ${Bot.lain.cfg.QQBotGroupId}~`)
-      data.reply(msg.join('\n'))
-      redis.set(`lain:QQBot:tips:${groupId}`, JSON.stringify({ group_id: groupId }))
-    }
-  }
-
   /** ffmpeg转码 转为pcm */
   async runFfmpeg(input, output) {
     let cm
@@ -902,7 +931,7 @@ export default class adapterQQBot {
     /** 获取正确的id */
     if (Bot.QQToOpenid) {
       try {
-        groupID = await Bot.QQToOpenid(groupId, e, 'group')
+        groupID = await Bot.QQToOpenid(groupID, e, 'group')
       } catch {
         groupID = groupID.split('-')[1] || groupID.split('-')[0] || groupID
       }

@@ -14,8 +14,8 @@ export default class QQSDK {
   async start () {
     /** appid */
     this.id = this.config.appid
-    /** 移除at */
-    this.config.removeAt = true
+    /** 保留原始 at，后续由适配层统一识别和裁剪 */
+    this.config.removeAt = false
     /** QQBotID */
     this.QQBot = this.config.appid
     /** QQGuidID */
