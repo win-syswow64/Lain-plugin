@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Runtime data
+data/
+temp/
+tmp/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+*.sublime-workspace
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build / dist
+dist/
+build/
+
+# Package lock (optional — uncomment if preferred)
+# package-lock.json
+# yarn.lock
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Misc
+*.bak
+*.orig
+.cache/
+
+*.tar.gz
+
+22009-plugin/

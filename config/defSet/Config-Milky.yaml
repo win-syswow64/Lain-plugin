@@ -1,0 +1,27 @@
+# Milky 适配器
+enable: false
+
+# Milky 服务地址
+host: 127.0.0.1
+port: 3000
+prefix: ""
+
+# 连接方式: ws / webhook
+connection: ws
+
+# HTTP API 超时时间（秒）
+http_timeout: 15
+
+# 鉴权 token，没有则留空
+access_token: ""
+
+# 使用 https/wss
+ssl: false
+use_ssl: false
+
+ws:
+  heartbeat: 30
+  reconnect_interval: 10
+
+webhook:
+  path: /milky

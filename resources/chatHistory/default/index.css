@@ -1,0 +1,96 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    user-select: none;
+}
+
+body {
+    width: 600px;
+    background: url("./bg.jpg") left top repeat-y;
+    background-size: 100% auto;
+    padding-top: 24px;
+}
+
+.container {
+    background: url("./bg.jpg") top left repeat-y;
+    background-size: 100% auto;
+    width: 600px;
+}
+
+#cBody {
+    font-size: 24px;
+}
+
+.message {
+    display: flex;
+    margin-bottom: 10px;
+    padding-left: 0;
+    word-wrap: break-word;
+}
+
+.column {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    margin-left: 6px;
+    width: 460px;
+}
+
+.avatar img {
+    margin-left: 15px;
+    border-radius: 50%;
+    width: 48px;
+    height: 48px;
+}
+
+.text {
+    position: relative;
+    align-self: flex-start;
+    max-width: 100%;
+    margin-top: 6px;
+    border: 1px black solid;
+    border-radius: 12px;
+    padding: 12px;
+    background-color: rgba(255, 255, 255, 0.8);
+    line-height: 1.5;
+}
+
+.id {
+    position: absolute;
+    right: 10px;
+    bottom: 12px;
+    height: 0px;
+    font-size: 16px;
+    z-index: 1;
+    padding: 0 3px;
+}
+
+
+.id::before {
+    content: "";
+    position: absolute;
+    top: 12px;
+    left: 0;
+    right: 0;
+    border-top: 1px solid white;
+    z-index: -1;
+}
+
+.img {
+    border: 0;
+    position: relative;
+    margin-top: 6px;
+    width: 460px;
+}
+
+.img .id::before {
+    content: '';
+    border-top: 0;
+}
+
+.text img,
+.img img {
+    border-radius: 12px;
+    max-width: 100%;
+}

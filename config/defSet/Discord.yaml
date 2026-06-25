@@ -1,0 +1,8 @@
+# Discord Bot, 填写格式: [ { id: 1, name: "", uin: "", token: "" } ]
+bot: []
+
+# 是否自动连接, 如果为false, 则需要自己发送 `#kook[序号]上线`, 如 `#kook1上线`
+autoConnect: false
+
+# 是否开启发送按钮
+sendButton: false
