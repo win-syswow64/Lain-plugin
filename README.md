@@ -3,7 +3,7 @@
 `Lain-plugin`是一个围绕喵崽`Miao-Yunzai`开发的多适配器插件，让喵崽接入`QQ频道`、`微信`、`shamrock`、`KOOK`等三方平台~，不再局限于ICQQ。
 
 
-### 适用于`Lain-plugin`的`QQBot`适配器的统计插件:[22009-plugin](https://gitee.com/zzwh12/22009-plugin)
+### 适用于`Lain-plugin`的`QQBot`适配器的统计插件:[22009-plugin](https://github.com/win-syswow64/22009-plugin)
 
 ## 使用
 ### 0. 前置：跳过云崽的ICQQ登录
@@ -17,33 +17,15 @@
 
 在`Miao-Yunzai`根目录执行
 
-### Gitee:
-```
-git clone --depth=1 https://gitee.com/lylnspace/Lain-plugin ./plugins/Lain-plugin
-```
 ### Gtihub:
 ```
-git clone --depth=1 https://github.com/Circle-money-run/Lain-plugin ./plugins/Lain-plugin
-```
-### ghproxy安装:
-```
-git clone --depth=1 https://mirror.ghproxy.com/https://github.com/Circle-money-run/Lain-plugin ./plugins/Lain-plugin
+git clone --depth=1 https://github.com/win-syswow64/Lain-plugin ./plugins/Lain-plugin
 ```
 
 ### 2.安装依赖
 
 ```
 pnpm install -P
-```
-
-`安装失败再用这个：`
-```
-pnpm config set sharp_binary_host "https://npmmirror.com/mirrors/sharp" && pnpm config set sharp_libvips_binary_host "https://npmmirror.com/mirrors/sharp-libvips" && pnpm install -P
-```
-
-### PS：若您使用的是ws地址是llonebot，请使用此椰奶进行点赞（止语的椰奶点不起）
-```
-https://gitee.com/lylnspace/yenai-plugin
 ```
 
 ### 3.使用适配器
