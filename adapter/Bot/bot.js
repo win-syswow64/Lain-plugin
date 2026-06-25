@@ -431,21 +431,21 @@ Bot.Button = function (list, line = 3) {
       let Button = {
         id: String(id),
         render_data: {
-          label: i.text || i.label || i.link,
+          label: i.text ?? i.label ?? i.link ?? '',
           style: (i.style == 0) ? 0 : 1,
-          visited_label: i.text || i.label || i.link
+          visited_label: i.visited_label ?? i.text ?? i.label ?? i.link ?? ''
         },
         action: {
-          type: i.type || (i.link ? 0 : 2),
+          type: i.type ?? (i.link ? 0 : i.callback ? 1 : 2),
           reply: i.reply || false,
-          permission: i.permission || {
-            type: (i.admin && 1) || (i.list && '0') || (i.role && 3) || 2,
+          permission: i.permission ?? {
+            type: (Number(i.admin) && 1) || (i.list && 0) || (Number(i.role) && 3) || 2,
             specify_user_ids: i.list || [],
             specify_role_ids: i.role || []
           },
-          data: i.data || i.input || i.callback || i.link || i.text || i.label,
-          enter: i.send || i.enter || 'callback' in i || false,
-          unsupport_tips: i.tips || 'err'
+          data: i.data ?? i.input ?? i.callback ?? i.link ?? i.text ?? i.label ?? '',
+          enter: i.send ?? i.enter ?? ('callback' in i),
+          unsupport_tips: i.tips || '暂不支持此按钮'
         }
       }
       if (i.QQBot) {
@@ -505,6 +505,24 @@ Bot.ICQQproto = function (file) {
 }
 
 /** QQBot Markdown 消息段 */
+/** QQBot 按钮消息段（兼容 miao-plugin segment.button 风格） */
+if (!segment.button) {
+  segment.button = function (...rows) {
+    // 支持 segment.button([...], [...], ...) 和 segment.button([[...], [...]])
+    if (rows.length === 1 && Array.isArray(rows[0]) && rows[0].length && Array.isArray(rows[0][0])) {
+      rows = rows[0]
+    }
+    // 保留原始行结构，每行单独用 Bot.Button 处理
+    const result = []
+    for (const row of rows) {
+      if (!row) continue
+      const items = Array.isArray(row) ? row : [row]
+      result.push(...Bot.Button(items, items.length))
+    }
+    return result
+  }
+}
+
 if (!segment.markdown) {
   segment.markdown = function (data, options = {}) {
     if (typeof data === 'object' && data !== null) {

@@ -11,6 +11,7 @@ import loader from '../../../../lib/plugins/loader.js'
 import common from '../../lib/common/common.js'
 import Cfg from '../../lib/config/config.js'
 import Button from './plugins.js'
+import QQBotButton from './Button.js'
 
 lain.DAU = {}
 
@@ -70,6 +71,14 @@ export default class adapterQQBot {
       id = this.id
       avatar = 'https://cdn.jsdelivr.net/gh/Zyy955/imgs/img/202402020757587.gif'
       username = 'QQBot'
+    }
+
+    /** miao-plugin 风格 Button API */
+    if (!Bot.Button.create) {
+      Bot.Button.create = QQBotButton.create
+      Bot.Button.nav = QQBotButton.nav
+      Bot.Button.isButton = QQBotButton.isButton
+      Bot.Button.extract = QQBotButton.extract
     }
 
     Bot[this.id] = {
@@ -164,6 +173,7 @@ export default class adapterQQBot {
   pickFriend(userId) {
     return {
       sendMsg: async (msg) => await this.sendFriendMsg(userId, msg),
+      recallMsg: async (msg_id) => await this.recallPrivateMsg(userId, msg_id),
       makeForwardMsg: async (data) => await common.makeForwardMsg(data),
       getChatHistory: async () => [],
       getAvatarUrl: (size = 0) => this.getAvatarUrl(size, userId)
@@ -199,13 +209,16 @@ export default class adapterQQBot {
     return Number(id) ? `https://q1.qlogo.cn/g?b=qq&s=${size}&nk=${id}` : `https://q.qlogo.cn/qqapp/${this.id}/${id.split('-')[1] || id}/${size}`
   }
 
+  /** 撤回群消息 */
   async recallGroupMsg(group_id, message_id) {
-    if (Bot.QQToOpenid) {
-      try {
-        group_id = await Bot.QQToOpenid(groupId, e, 'group')
-      } catch { }
-    }
+    group_id = String(group_id).split('-').pop() || group_id
     return await this.sdk.recallGroupMessage(group_id, message_id)
+  }
+
+  /** 撤回私聊消息 */
+  async recallPrivateMsg(user_id, message_id) {
+    user_id = String(user_id).split('-').pop() || user_id
+    return await this.sdk.recallPrivateMessage(user_id, message_id)
   }
 
   /** 转换格式给云崽处理 */
@@ -229,16 +242,44 @@ export default class adapterQQBot {
       })
     }
 
-    /** 构建快速回复消息 */
+    /** 获取匹配的按钮行（供自动附加） */
+    const getAutoButtons = async () => {
+      try { return await this.button(e) } catch { return false }
+    }
+
+    /** 构建快速回复消息（自动附加按钮插件） */
     e.reply = async (msg, quote) => {
       if (quote?.markdown) return await this.sendMarkdownReplyMsg(e, msg, quote)
+      if (e.adapter === 'QQBot') {
+        // 提取 Button.create() 生成的按钮对象
+        if (Array.isArray(msg)) {
+          const extracted = QQBotButton.extract(msg)
+          msg = extracted.msgs
+          if (extracted.button) {
+            msg = [...msg, extracted.button]
+          }
+        }
+        // 自动附加 button 插件按钮
+        const btnRows = await getAutoButtons()
+        if (btnRows?.length) {
+          msg = Array.isArray(msg) ? [...msg, ...btnRows] : [msg, ...btnRows]
+        }
+      }
       return await this.sendReplyMsg(e, msg, quote)
     }
-    e.markdown = async (msg, options = {}) => await this.sendMarkdownReplyMsg(e, msg, options)
+    e.markdown = async (msg, options = {}) => {
+      if (!options.buttons && !options.button && e.adapter === 'QQBot') {
+        const btnRows = await getAutoButtons()
+        if (btnRows?.length) options.buttons = btnRows
+      }
+      return await this.sendMarkdownReplyMsg(e, msg, options)
+    }
     e.replyMarkdown = e.markdown
     e.sendMarkdown = e.markdown
     /** 快速撤回 */
-    e.recall = async () => await this.recallGroupMsg(data.group_id, data.message_id)
+    e.recall = async () => isGroup
+      ? await this.recallGroupMsg(data.group_id, data.message_id)
+      : await this.recallPrivateMsg(data.user_id, data.message_id)
     /** 将收到的消息转为字符串 */
     e.toString = () => e.raw_message
     /** 获取对应用户头像 */
@@ -382,13 +423,15 @@ export default class adapterQQBot {
     const Pieces = []
     let normalMsg = []
     let content = ''
-    const buttons = []
+    const buttonRows = []
 
     const flushMarkdown = async () => {
-      if (!content && !buttons.length) return
+      if (!content && !buttonRows.length) return
       const piece = []
       piece.push({ type: 'markdown', content: content || ' ' })
-      if (buttons.length) piece.push(...buttons.splice(0, 5))
+      if (buttonRows.length) {
+        piece.push({ type: 'keyboard', content: { rows: buttonRows.splice(0, 5) } })
+      }
       Pieces.push(piece)
       content = ''
     }
@@ -407,7 +450,7 @@ export default class adapterQQBot {
           let text = i.type === 'forward' ? String(i.text).trim() + '\n' : String(i.text).trim()
           text = text.replace('@everyone', 'everyone')
           for (const p of this.HandleURL(text)) {
-            if (p.type === 'button') buttons.push(...this.normalizeButtons(e, p))
+            if (p.type === 'button') buttonRows.push(...this.normalizeButtons(e, p))
             else appendText(p.text)
           }
           break
@@ -431,7 +474,10 @@ export default class adapterQQBot {
           break
         }
         case 'button':
-          buttons.push(...this.normalizeButtons(e, i))
+          buttonRows.push(...this.normalizeButtons(e, i))
+          break
+        case 'keyboard':
+          if (i.content?.rows) buttonRows.push(...i.content.rows)
           break
         case 'markdown':
           appendText(await this.makeMarkdownContent(e, i.data || i))
@@ -456,7 +502,7 @@ export default class adapterQQBot {
       }
     }
 
-    if (content || buttons.length) await flushMarkdown()
+    if (content || buttonRows.length) await flushMarkdown()
     if (message.length) Pieces.unshift(message)
     normalMsg = message.length ? [message] : []
 
@@ -614,8 +660,10 @@ export default class adapterQQBot {
   async markdown(e, data, Button = true) {
     const message = [{ type: 'markdown', content: await this.makeMarkdownContent(e, data) }]
     if (Button) {
-      const button = await this.button(e)
-      if (button?.length) message.push(...button)
+      const buttonRows = await this.button(e)
+      if (buttonRows?.length) {
+        message.push({ type: 'keyboard', content: { rows: buttonRows } })
+      }
     }
     return message
   }
@@ -632,20 +680,20 @@ export default class adapterQQBot {
           continue
         }
         const built = this.buildButton(e, {
-          text: btn.text || btn.label || btn.data || btn.input || btn.callback || btn.link,
-          clicked_text: btn.clicked_text || btn.visited_label,
+          text: btn.text ?? btn.label ?? btn.data ?? btn.input ?? btn.callback ?? btn.link ?? '',
+          clicked_text: btn.clicked_text ?? btn.visited_label,
           link: btn.link,
-          callback: btn.callback || (!btn.link && !btn.input ? btn.data : undefined),
+          callback: btn.callback ?? (!btn.link && !btn.input ? btn.data : undefined),
           input: btn.input,
-          send: btn.send || btn.enter,
-          permission: btn.permission || btn.list,
+          send: btn.send ?? btn.enter ?? (!btn.link && !btn.input && btn.data != null ? true : undefined),
+          permission: btn.permission ?? btn.list,
           style: btn.style,
-          tips: btn.tips || btn.unsupport_tips,
+          tips: btn.tips ?? btn.unsupport_tips,
           QQBot: btn.QQBot,
         }, buttons.length % 2)
         if (built) buttons.push(built)
       }
-      if (buttons.length) result.push({ type: 'button', buttons: buttons.slice(0, 5) })
+      if (buttons.length) result.push(buttons.slice(0, 5))
     }
 
     if (input?.type === 'button' && Array.isArray(input.buttons)) {
@@ -725,10 +773,9 @@ export default class adapterQQBot {
     const markdown = await this.makeMarkdownSegment(e, data, options)
     const message = [markdown]
 
-    if (options.button) {
-      message.push(...this.normalizeButtons(e, options.button))
-    } else if (options.buttons) {
-      message.push(...this.normalizeButtons(e, options.buttons))
+    const btnRows = this.normalizeButtons(e, options.buttons || options.button)
+    if (btnRows.length) {
+      message.push({ type: 'keyboard', content: { rows: btnRows } })
     }
 
     return message
@@ -884,7 +931,7 @@ export default class adapterQQBot {
     let urls = Bot.getUrls(msg, Cfg.WhiteLink)
 
     urls.forEach(link => {
-      message.push(...Bot.Button([{ link }]), 1)
+      message.push(...Bot.Button([{ link }]))
       msg = msg.replace(link, '[链接(请点击按钮查看)]')
       msg = msg.replace(link.replace(/^http:\/\//g, ''), '[链接(请点击按钮查看)]')
       msg = msg.replace(link.replace(/^https:\/\//g, ''), '[链接(请点击按钮查看)]')
@@ -1136,7 +1183,7 @@ export default class adapterQQBot {
         if (built) buttons.push(built)
         idx++
       }
-      if (buttons.length) result.push({ type: 'button', buttons })
+      if (buttons.length) result.push(buttons)
     }
     return result
   }

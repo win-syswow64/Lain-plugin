@@ -13,7 +13,7 @@ class Button {
   async loadModule (filePath) {
     filePath = filePath.replace(/\\/g, '/')
     try {
-      let Plugin = (await import(`../../../.${filePath}?${moment().format('x')}`)).default
+      let Plugin = (await import(`../../${filePath}?${moment().format('x')}`)).default
       Plugin = new Plugin()
       Plugin.plugin._path = filePath
       this.botModules.push(Plugin)
@@ -39,13 +39,13 @@ class Button {
    * @param {string} eventType - 事件类型 ('add', 'change', 'unlink')
    */
   async handleFileChange (filePath, eventType, state) {
-    filePath = './' + filePath.replace(/\\/g, '/')
+    filePath = filePath.replace(/\\/g, '/')
     if (filePath.endsWith('.js')) {
       if (eventType === 'add') {
         this.unloadModule(filePath)
         await this.loadModule(filePath)
         if (!state) logger.mark(`[Lain-plugin][新增按钮插件][${filePath}]`)
-      } else if (eventType === 'add' || eventType === 'change') {
+      } else if (eventType === 'change') {
         this.unloadModule(filePath)
         await this.loadModule(filePath)
         logger.mark(`[Lain-plugin][修改按钮插件][${filePath}]`)
@@ -95,6 +95,49 @@ class Button {
 
         return watcher
       })
+
+      /** plugins/button/ 独立按钮插件目录热更新 */
+      const buttonDir = this.plugin + '/button'
+      if (fs.existsSync(buttonDir)) {
+        /** 初始加载 */
+        const btnFiles = fs.readdirSync(buttonDir).filter(f => f.endsWith('.js'))
+        for (const file of btnFiles) {
+          const relPath = 'plugins/button/' + file
+          this.unloadModule(relPath)
+          await this.loadModule(relPath)
+          logger.mark(`[Lain-plugin][加载按钮插件][${relPath}]`)
+        }
+        /** 监听 button 目录变化 */
+        const btnWatcher = chokidar.watch(buttonDir, {
+          ignored: /[\/\\]\./,
+          persistent: true,
+          ignoreInitial: true
+        })
+        btnWatcher
+          .on('add', async filePath => {
+            const file = filePath.split('/').pop()
+            if (!file.endsWith('.js')) return
+            const relPath = 'plugins/button/' + file
+            this.unloadModule(relPath)
+            await this.loadModule(relPath)
+            logger.mark(`[Lain-plugin][新增按钮插件][${relPath}]`)
+          })
+          .on('change', async filePath => {
+            const file = filePath.split('/').pop()
+            if (!file.endsWith('.js')) return
+            const relPath = 'plugins/button/' + file
+            this.unloadModule(relPath)
+            await this.loadModule(relPath)
+            logger.mark(`[Lain-plugin][热更新按钮插件][${relPath}]`)
+          })
+          .on('unlink', async filePath => {
+            const file = filePath.split('/').pop()
+            if (!file.endsWith('.js')) return
+            const relPath = 'plugins/button/' + file
+            this.unloadModule(relPath)
+            logger.mark(`[Lain-plugin][卸载按钮插件][${relPath}]`)
+          })
+      }
 
       return this.botModules
     } catch (error) {
