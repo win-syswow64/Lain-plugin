@@ -235,6 +235,8 @@ export default class adapterQQBot {
     const rawAuthorId = e.author?.id
     const senderOpenid = this.getMessageUserOpenid(e)
     const senderMemberOpenid = this.getMessageMemberOpenid(e)
+    const memberRole = this.getMemberRole(e)
+    const nickname = e.author?.username || e.sender?.user_name || e.sender?.nickname || e.user_id || ''
     const rawSender = {
       user_id: rawUserId,
       author_id: rawAuthorId,
@@ -249,12 +251,20 @@ export default class adapterQQBot {
     e.time = data.timestamp
     e.self_id = this.id
     e.sendMsg = data.reply
-    e.raw_message = e.raw_message.trim()
+    e.message = Array.isArray(e.message) ? e.message : []
+    e.qqbot_message = e.message.map(i => ({ ...i }))
+    e.raw_message = String(e.raw_message || '').trim()
     this.normalizeIncomingMessage(e, tinyId)
 
     if (Bot[this.id].config.other.Prefix) {
       e.message.some(msg => {
         if (msg.type === 'text') {
+          if (this.isMentionText(msg.text)) return false
+          const mentionPrefix = String(msg.text || '').match(/^(\s*<@!?[^>]+>\s*)([\s\S]+)$/)
+          if (mentionPrefix) {
+            msg.text = mentionPrefix[1] + this.hasAlias(mentionPrefix[2], e)
+            return true
+          }
           msg.text = this.hasAlias(msg.text, e)
           return true
         }
@@ -262,6 +272,7 @@ export default class adapterQQBot {
       })
       this.normalizeIncomingMessage(e, tinyId)
     }
+    this.defineIncomingMsg(e)
 
     /** 获取匹配的按钮行（供自动附加） */
     const getAutoButtons = async () => {
@@ -316,6 +327,8 @@ export default class adapterQQBot {
       } catch { }
 
       e.member = this.member(e.group_id, e.user_id)
+      e.member.is_owner = memberRole === 'owner'
+      e.member.is_admin = memberRole === 'admin' || memberRole === 'owner'
       e.group_name = `${this.id}-${e.group_id}`
       e.group = this.pickGroup(e.group_id)
       e.message_type = 'group'
@@ -335,13 +348,21 @@ export default class adapterQQBot {
     e.member_openid = senderMemberOpenid
     e.group_openid = rawGroupId || ''
     e.raw_sender = rawSender
+    if (!e.sender) e.sender = {}
     e.sender.user_id = e.user_id
     e.sender.user_openid = senderOpenid
     e.sender.member_openid = senderMemberOpenid
     e.sender.group_openid = rawGroupId
-    /** 为什么本体会从群名片拿uid啊? */ /** 自动绑定，神奇吧 */
-    e.sender.card = senderMemberOpenid || senderOpenid
-    e.sender.nickname = e.user_id
+    e.sender.nickname = nickname
+    e.sender.card = nickname
+    e.sender.role = memberRole
+    e.sender.title = e.sender.title || ''
+    e.sender.level = e.sender.level || 1
+    if (e.member?.info) {
+      e.member.info = { ...e.member.info, ...e.sender }
+      e.member.info.group_id = e.group_id
+      e.member.info.user_id = e.user_id
+    }
 
     /** 缓存好友列表 */
     if (!Bot[e.self_id].fl.get(e.user_id)) Bot[e.self_id].fl.set(e.user_id, { user_id: e.user_id })
@@ -360,11 +381,12 @@ export default class adapterQQBot {
     const cleanId = id => String(id ?? '').replace(/^qg_/, '').split('-').pop()
     const selfIds = new Set([cleanId(this.id), cleanId(tinyId), cleanId(e.tiny_id)].filter(Boolean))
     const isGroupAtEvent = String(e.event_id || '').startsWith('GROUP_AT_MESSAGE_CREATE:')
+    const contentMention = String(e.content || '').match(/^<@!?([^>]+)>/)
 
     e.atme = message.some(i => {
       if (i?.type !== 'at') return false
       return [i.qq, i.id, i.user_id, i.tiny_id].some(id => selfIds.has(cleanId(id)))
-    })
+    }) || isGroupAtEvent || !!(contentMention && selfIds.has(cleanId(contentMention[1])))
 
     const text = message
       .filter(i => i?.type === 'text')
@@ -382,12 +404,50 @@ export default class adapterQQBot {
     delete e.msg
   }
 
+  defineIncomingMsg(e) {
+    const base = this.normalizeMsgText(e.raw_message)
+    let msg = base
+
+    Object.defineProperty(e, 'msg', {
+      enumerable: true,
+      configurable: true,
+      get: () => msg,
+      set: value => {
+        msg = this.normalizeMsgText(value, base)
+      }
+    })
+  }
+
+  normalizeMsgText(value, base = '') {
+    let text = String(value || '').replace(/<@!?[^>]+>\s*/g, '').trim()
+    const normalizedBase = String(base || '').trim()
+    if (normalizedBase) {
+      const repeated = new RegExp(`^(?:${this.escapeRegExp(normalizedBase)}\\s*)+$`)
+      if (repeated.test(text)) return normalizedBase
+    }
+    return text
+  }
+
+  escapeRegExp(text) {
+    return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  }
+
   getMessageUserOpenid(e) {
     return String(e.author?.member_openid || e.sender?.member_openid || e.sender?.user_openid || e.user_id || e.author?.id || '').trim()
   }
 
   getMessageMemberOpenid(e) {
     return String(e.author?.member_openid || e.sender?.member_openid || e.sender?.user_openid || e.user_id || '').trim()
+  }
+
+  getMemberRole(e) {
+    const role = String(e.author?.member_role || e.member?.member_role || e.sender?.role || '').toLowerCase()
+    if (role === 'owner' || role === 'admin') return role
+    return 'member'
+  }
+
+  isMentionText(text) {
+    return /^<@!?[^>]+>$/.test(String(text || '').trim())
   }
 
   formatQQBotId(id) {

@@ -103,6 +103,32 @@ export default class QQSDK {
     if (!EventIndex.EventParserMap.has('message.group')) {
       EventIndex.EventParserMap.set('message.group', EventIndex.EventParserMap.get(EventIndex.QQEvent.GROUP_AT_MESSAGE_CREATE))
     }
+
+    QQSDK.wrapMessageParser('message.group')
+    QQSDK.wrapMessageParser('message.private.friend')
+  }
+
+  static wrapMessageParser (eventName) {
+    const parser = EventIndex.EventParserMap.get(eventName)
+    if (!parser || parser._lainOfficialMessageWrapped) return
+
+    const wrapped = function (event, payload) {
+      const officialMessage = Array.isArray(payload?.message)
+        ? payload.message.map(i => ({ ...i }))
+        : null
+      const officialRawMessage = typeof payload?.raw_message === 'string' ? payload.raw_message : null
+      const result = parser.apply(this, [event, payload])
+
+      if (result && officialMessage?.length) {
+        result.message = officialMessage
+      }
+      if (result && officialRawMessage !== null) {
+        result.raw_message = officialRawMessage
+      }
+      return result
+    }
+    wrapped._lainOfficialMessageWrapped = true
+    EventIndex.EventParserMap.set(eventName, wrapped)
   }
 
   /** 全局注册一次 WebHook Express 路由 */
