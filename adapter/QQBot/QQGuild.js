@@ -409,6 +409,19 @@ export default class adapterQQGuild {
   normalizeButtons(e, input) {
     const result = []
     const pushRow = row => {
+      if (row?.type === 'keyboard' && row.content?.rows) {
+        for (const item of row.content.rows) pushRow(item)
+        return
+      }
+      if (row?.type === 'button' && Array.isArray(row.buttons)) {
+        pushRow(row.buttons)
+        return
+      }
+      if (row?.buttons && Array.isArray(row.buttons)) {
+        pushRow(row.buttons)
+        return
+      }
+
       const items = Array.isArray(row) ? row : [row]
       const buttons = []
       for (const btn of items) {
@@ -421,17 +434,23 @@ export default class adapterQQGuild {
           text: btn.text || btn.label || btn.data || btn.input || btn.callback || btn.link,
           clicked_text: btn.clicked_text || btn.visited_label,
           link: btn.link,
-          callback: btn.callback || (!btn.link && !btn.input ? btn.data : undefined),
-          input: btn.input,
-          send: btn.send || btn.enter,
+          callback: btn.callback,
+          input: btn.input ?? (!btn.link && btn.callback == null ? btn.data : undefined),
+          send: btn.send ?? btn.enter ?? (!btn.link && btn.callback == null && btn.data != null ? true : undefined),
           permission: btn.permission || btn.list,
-          style: btn.style,
+          style: btn.style != null ? Number(btn.style) : undefined,
           tips: btn.tips || btn.unsupport_tips,
           QQBot: btn.QQBot,
         }, buttons.length % 2)
         if (built) buttons.push(built)
+        if (buttons.length >= 5) break
       }
       if (buttons.length) result.push({ type: 'button', buttons: buttons.slice(0, 5) })
+    }
+
+    if (input?.type === 'keyboard' && input.content?.rows) {
+      for (const row of input.content.rows) pushRow(row)
+      return result.slice(0, 5)
     }
 
     if (input?.type === 'button' && Array.isArray(input.buttons)) {
@@ -439,12 +458,16 @@ export default class adapterQQGuild {
       return result.slice(0, 5)
     }
 
-    const rows = input?.data || input?.buttons || input
+    if (input?.buttons && Array.isArray(input.buttons)) {
+      pushRow(input)
+      return result.slice(0, 5)
+    }
+
+    const rows = input?.type === 'button' ? input.data : input
     const source = Array.isArray(rows) ? rows : [rows]
     for (const row of source) {
       if (!row) continue
-      if (row.type === 'button' && Array.isArray(row.buttons)) pushRow(row.buttons)
-      else pushRow(row)
+      pushRow(row)
       if (result.length >= 5) break
     }
     return result
@@ -490,8 +513,11 @@ export default class adapterQQGuild {
           break
         case 'ark':
         case 'button':
+        case 'keyboard':
+          message.push(...this.normalizeButtons(e, i))
+          break
         case 'markdown':
-          message.push(i.type === 'markdown' ? await this.makeMarkdownSegment(e, i.data || i) : i)
+          message.push(await this.makeMarkdownSegment(e, i.data || i))
           break
         default:
           message.push(i)
@@ -590,6 +616,7 @@ export default class adapterQQGuild {
           content += `![${i.summary || '图片'}](${await Bot.FormatFile(i.url || i.file)})`
           break
         case 'button':
+        case 'keyboard':
           buttons.push(...this.normalizeButtons(e, i))
           break
         case 'markdown':
@@ -718,7 +745,7 @@ export default class adapterQQGuild {
       render_data: {
         label: btn.text || '',
         visited_label: btn.clicked_text || btn.text || '',
-        style: btn.style != null ? btn.style : style,
+        style: btn.style != null ? Number(btn.style) : style,
         ...(btn.QQBot?.render_data || {}),
       },
     }

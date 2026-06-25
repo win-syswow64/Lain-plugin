@@ -76,6 +76,7 @@ export default class Button {
       else if (btn.callback) type = 1
       else type = 2
     }
+    type = Number(type)
 
     // 确定 data
     const data = btn.data ?? btn.input ?? btn.callback ?? btn.link ?? ''
@@ -103,7 +104,7 @@ export default class Button {
       render_data: {
         label,
         visited_label: btn.visited_label ?? label,
-        style: btn.style ?? (idx % 2)
+        style: btn.style != null ? Number(btn.style) : (idx % 2)
       },
       action: {
         type,

@@ -1,10 +1,15 @@
 import fs from 'fs'
-import moment from 'moment'
+import { fileURLToPath, pathToFileURL } from 'url'
+import path from 'path'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const pluginRoot = path.resolve(__dirname, '../..')
 import chokidar from 'chokidar'
 
 class Button {
   constructor () {
-    this.plugin = './plugins'
+    this.plugin = pluginRoot + '/plugins'
     this.botModules = []
     this.initialize()
   }
@@ -13,10 +18,18 @@ class Button {
   async loadModule (filePath) {
     filePath = filePath.replace(/\\/g, '/')
     try {
-      let Plugin = (await import(`../../${filePath}?${moment().format('x')}`)).default
-      Plugin = new Plugin()
-      Plugin.plugin._path = filePath
-      this.botModules.push(Plugin)
+      const absPath = path.resolve(pluginRoot, filePath)
+      const fileUrl = pathToFileURL(absPath)
+      fileUrl.searchParams.set('t', String(Date.now()) + Math.random().toString(36).slice(2))
+      const mod = await import(fileUrl.href)
+      const PluginClass = mod.default
+      if (typeof PluginClass !== 'function') {
+        logger.error(`导入按钮模块 ${filePath} 时出错：default export 不是构造函数 (类型: ${typeof PluginClass})`)
+        return
+      }
+      const instance = new PluginClass()
+      instance.plugin._path = filePath
+      this.botModules.push(instance)
       /** 排序 */
       this.botModules.sort((a, b) => a.plugin.priority - b.plugin.priority)
       logger.debug(`按钮模块 ${filePath} 已加载。`)
@@ -68,17 +81,6 @@ class Button {
         if (!fs.lstatSync(folderPath).isDirectory()) continue
         /** 保存插件包目录 */
         filesList.push(this.plugin + `/${folder}/lain.support.js`)
-      }
-
-      /** 获取插件包内的文件夹，进行热更 */
-      const pluginList = fs.readdirSync(this.plugin + '/Lain-plugin/plugins')
-      /** 支持插件包按钮 */
-      for (let folder of pluginList) {
-        const folderPath = this.plugin + `/Lain-plugin/plugins/${folder}`
-        /** 检查是否为文件夹 */
-        if (!fs.lstatSync(folderPath).isDirectory()) continue
-        /** 保存 */
-        filesList.push(folderPath)
       }
 
       /** 热更新 */

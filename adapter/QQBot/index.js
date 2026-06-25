@@ -231,6 +231,7 @@ export default class adapterQQBot {
     e.self_id = this.id
     e.sendMsg = data.reply
     e.raw_message = e.raw_message.trim()
+    this.normalizeIncomingMessage(e, tinyId)
 
     if (Bot[this.id].config.other.Prefix) {
       e.message.some(msg => {
@@ -240,6 +241,7 @@ export default class adapterQQBot {
         }
         return false
       })
+      this.normalizeIncomingMessage(e, tinyId)
     }
 
     /** 获取匹配的按钮行（供自动附加） */
@@ -323,6 +325,28 @@ export default class adapterQQBot {
     /** dau统计 */
     this.msg_count(data)
     return e
+  }
+
+  normalizeIncomingMessage(e, tinyId) {
+    const message = Array.isArray(e.message) ? e.message : []
+    const cleanId = id => String(id ?? '').replace(/^qg_/, '').split('-').pop()
+    const selfIds = new Set([cleanId(this.id), cleanId(tinyId), cleanId(e.tiny_id)].filter(Boolean))
+
+    e.atme = message.some(i => {
+      if (i?.type !== 'at') return false
+      return [i.qq, i.id, i.user_id, i.tiny_id].some(id => selfIds.has(cleanId(id)))
+    })
+
+    const text = message
+      .filter(i => i?.type === 'text')
+      .map(i => i.text || '')
+      .join('')
+      .trim()
+
+    let msg = text || String(e.msg || e.raw_message || '').trim()
+    if (e.atme) msg = msg.replace(/^<@!?.+?>\s*/, '').trim()
+    e.msg = msg
+    if (e.atme && msg) e.raw_message = msg
   }
 
   /** 前缀处理 */
@@ -427,12 +451,15 @@ export default class adapterQQBot {
 
     const flushMarkdown = async () => {
       if (!content && !buttonRows.length) return
-      const piece = []
-      piece.push({ type: 'markdown', content: content || ' ' })
-      if (buttonRows.length) {
-        piece.push({ type: 'keyboard', content: { rows: buttonRows.splice(0, 5) } })
-      }
-      Pieces.push(piece)
+      do {
+        const piece = []
+        piece.push({ type: 'markdown', content: content || ' ' })
+        if (buttonRows.length) {
+          piece.push({ type: 'keyboard', content: { rows: buttonRows.splice(0, 5) } })
+        }
+        Pieces.push(piece)
+        content = ''
+      } while (buttonRows.length)
       content = ''
     }
 
@@ -450,7 +477,7 @@ export default class adapterQQBot {
           let text = i.type === 'forward' ? String(i.text).trim() + '\n' : String(i.text).trim()
           text = text.replace('@everyone', 'everyone')
           for (const p of this.HandleURL(text)) {
-            if (p.type === 'button') buttonRows.push(...this.normalizeButtons(e, p))
+            if (p.type === 'button' || p.type === 'keyboard') buttonRows.push(...this.normalizeButtons(e, p))
             else appendText(p.text)
           }
           break
@@ -477,7 +504,7 @@ export default class adapterQQBot {
           buttonRows.push(...this.normalizeButtons(e, i))
           break
         case 'keyboard':
-          if (i.content?.rows) buttonRows.push(...i.content.rows)
+          buttonRows.push(...this.normalizeButtons(e, i))
           break
         case 'markdown':
           appendText(await this.makeMarkdownContent(e, i.data || i))
@@ -660,7 +687,7 @@ export default class adapterQQBot {
   async markdown(e, data, Button = true) {
     const message = [{ type: 'markdown', content: await this.makeMarkdownContent(e, data) }]
     if (Button) {
-      const buttonRows = await this.button(e)
+      const buttonRows = this.normalizeButtons(e, await this.button(e))
       if (buttonRows?.length) {
         message.push({ type: 'keyboard', content: { rows: buttonRows } })
       }
@@ -671,29 +698,51 @@ export default class adapterQQBot {
   normalizeButtons(e, input) {
     const result = []
     const pushRow = row => {
+      if (row?.type === 'keyboard' && row.content?.rows) {
+        for (const item of row.content.rows) pushRow(item)
+        return
+      }
+      if (row?.type === 'button' && Array.isArray(row.buttons)) {
+        pushRow(row.buttons)
+        return
+      }
+      if (row?.buttons && Array.isArray(row.buttons)) {
+        pushRow(row.buttons)
+        return
+      }
+
       const items = Array.isArray(row) ? row : [row]
       const buttons = []
       for (const btn of items) {
         if (!btn) continue
         if (btn.render_data && btn.action) {
           buttons.push(btn)
-          continue
+        } else {
+          const built = this.buildButton(e, {
+            text: btn.text ?? btn.label ?? btn.data ?? btn.input ?? btn.callback ?? btn.link ?? '',
+            clicked_text: btn.clicked_text ?? btn.visited_label,
+            link: btn.link,
+            callback: btn.callback,
+            input: btn.input ?? (!btn.link && btn.callback == null ? btn.data : undefined),
+            send: btn.send ?? btn.enter ?? (!btn.link && btn.callback == null && btn.data != null ? true : undefined),
+            permission: btn.permission ?? btn.list,
+            style: btn.style,
+            tips: btn.tips ?? btn.unsupport_tips,
+            QQBot: btn.QQBot,
+          }, buttons.length % 2)
+          if (built) buttons.push(built)
         }
-        const built = this.buildButton(e, {
-          text: btn.text ?? btn.label ?? btn.data ?? btn.input ?? btn.callback ?? btn.link ?? '',
-          clicked_text: btn.clicked_text ?? btn.visited_label,
-          link: btn.link,
-          callback: btn.callback ?? (!btn.link && !btn.input ? btn.data : undefined),
-          input: btn.input,
-          send: btn.send ?? btn.enter ?? (!btn.link && !btn.input && btn.data != null ? true : undefined),
-          permission: btn.permission ?? btn.list,
-          style: btn.style,
-          tips: btn.tips ?? btn.unsupport_tips,
-          QQBot: btn.QQBot,
-        }, buttons.length % 2)
-        if (built) buttons.push(built)
+        if (buttons.length >= 5) {
+          result.push({ buttons: buttons.splice(0, 5) })
+          if (result.length >= 5) return
+        }
       }
-      if (buttons.length) result.push(buttons.slice(0, 5))
+      if (buttons.length) result.push({ buttons })
+    }
+
+    if (input?.type === 'keyboard' && input.content?.rows) {
+      for (const row of input.content.rows) pushRow(row)
+      return result.slice(0, 5)
     }
 
     if (input?.type === 'button' && Array.isArray(input.buttons)) {
@@ -701,12 +750,16 @@ export default class adapterQQBot {
       return result.slice(0, 5)
     }
 
-    const rows = input?.data || input?.buttons || input
+    if (input?.buttons && Array.isArray(input.buttons)) {
+      pushRow(input)
+      return result.slice(0, 5)
+    }
+
+    const rows = input?.type === 'button' ? input.data : input
     const source = Array.isArray(rows) ? rows : [rows]
     for (const row of source) {
       if (!row) continue
-      if (row.type === 'button' && Array.isArray(row.buttons)) pushRow(row.buttons)
-      else pushRow(row)
+      pushRow(row)
       if (result.length >= 5) break
     }
     return result
@@ -1109,7 +1162,7 @@ export default class adapterQQBot {
       render_data: {
         label: btn.text || '',
         visited_label: btn.clicked_text || btn.text || '',
-        style: btn.style != null ? btn.style : style,
+        style: btn.style != null ? Number(btn.style) : style,
         ...(btn.QQBot?.render_data || {}),
       },
     }
@@ -1182,8 +1235,10 @@ export default class adapterQQBot {
         const built = this.buildButton(e, btn, idx % 2)
         if (built) buttons.push(built)
         idx++
+        if (buttons.length >= 5) break
       }
-      if (buttons.length) result.push(buttons)
+      if (buttons.length) result.push({ buttons })
+      if (result.length >= 5) break
     }
     return result
   }

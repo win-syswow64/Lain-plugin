@@ -399,72 +399,92 @@ Bot.getUrls = function (url, exclude = []) {
  * @returns {Array} button - 返回包含按钮信息的数组。
  */
 Bot.Button = function (list, line = 3) {
-  let id = 0
-  let index = 1
-  let arr = []
-  let button = []
+  if (!Array.isArray(list)) list = [list]
+  const rows = []
+  const maxLine = Math.max(1, Math.min(Number(line) || 3, 5))
+  let serial = 0
 
-  for (let i of list) {
-    /** 处理用户id */
-    if (i.list && i.list.length) {
-      const list = []
-      i.list.forEach(p => {
-        p = p.split('-')
-        p = p[1] || p[0]
-        list.push(p)
-      })
-      i.list = list
-    }
-
-    if (Array.isArray(i)) {
-      button.push(...Bot.Button(i, 10))
-    } else {
-      if (typeof i.permission === 'string') {
-        if (i.permission === 'xxx') {
-          i.list = []
-        } else {
-          const openid = i.permission.split('-')
-          i.list = [openid[1] || openid[0]]
-        }
-        i.permission = false
-      }
-      let Button = {
-        id: String(id),
-        render_data: {
-          label: i.text ?? i.label ?? i.link ?? '',
-          style: (i.style == 0) ? 0 : 1,
-          visited_label: i.visited_label ?? i.text ?? i.label ?? i.link ?? ''
-        },
-        action: {
-          type: i.type ?? (i.link ? 0 : i.callback ? 1 : 2),
-          reply: i.reply || false,
-          permission: i.permission ?? {
-            type: (Number(i.admin) && 1) || (i.list && 0) || (Number(i.role) && 3) || 2,
-            specify_user_ids: i.list || [],
-            specify_role_ids: i.role || []
-          },
-          data: i.data ?? i.input ?? i.callback ?? i.link ?? i.text ?? i.label ?? '',
-          enter: i.send ?? i.enter ?? ('callback' in i),
-          unsupport_tips: i.tips || '暂不支持此按钮'
-        }
-      }
-      if (i.QQBot) {
-        if (i.QQBot.render_data) Object.assign(Button.render_data, i.QQBot.render_data)
-        if (i.QQBot.action) Object.assign(Button.action, i.QQBot.action)
-      }
-      arr.push(Button)
-      if (index % line == 0 || index == list.length) {
-        button.push({
-          type: 'button',
-          buttons: arr
-        })
-        arr = []
-      }
-    }
-    id++
-    index++
+  const formatIds = ids => {
+    if (!Array.isArray(ids)) return []
+    return ids.map(id => {
+      const openid = String(id).split('-')
+      return openid[1] || openid[0]
+    })
   }
-  return button
+
+  const buildButton = (i = {}) => {
+    if (i.render_data && i.action) return i
+
+    i = { ...i }
+    if (i.list && i.list.length) i.list = formatIds(i.list)
+
+    if (typeof i.permission === 'string') {
+      if (i.permission === 'xxx') {
+        i.list = []
+      } else {
+        i.list = formatIds([i.permission])
+      }
+      i.permission = false
+    }
+
+    const type = Number(i.type ?? (i.link ? 0 : i.callback ? 1 : 2))
+    const label = i.text ?? i.label ?? i.link ?? ''
+    const button = {
+      id: String(i.id ?? serial++),
+      render_data: {
+        label,
+        style: Number(i.style) === 0 ? 0 : 1,
+        visited_label: i.visited_label ?? i.clicked_text ?? label
+      },
+      action: {
+        type,
+        reply: i.reply || false,
+        permission: i.permission || {
+          type: (Number(i.admin) && 1) || (i.list && 0) || (Number(i.role) && 3) || 2,
+          specify_user_ids: i.list || [],
+          specify_role_ids: i.role || []
+        },
+        data: i.data ?? i.input ?? i.callback ?? i.link ?? i.text ?? i.label ?? '',
+        enter: i.send ?? i.enter ?? (type === 2),
+        unsupport_tips: i.tips || i.unsupport_tips || '暂不支持此按钮'
+      }
+    }
+
+    if (i.QQBot) {
+      if (i.QQBot.render_data) Object.assign(button.render_data, i.QQBot.render_data)
+      if (i.QQBot.action) Object.assign(button.action, i.QQBot.action)
+    }
+
+    return button
+  }
+
+  const pushRow = row => {
+    const buttons = []
+    for (const item of (Array.isArray(row) ? row : [row])) {
+      if (!item) continue
+      const button = buildButton(item)
+      if (button) buttons.push(button)
+      if (buttons.length >= 5) {
+        rows.push({ buttons: buttons.splice(0, 5) })
+      }
+    }
+    if (buttons.length) rows.push({ buttons })
+  }
+
+  if (list.some(i => Array.isArray(i))) {
+    for (const row of list) pushRow(row)
+  } else {
+    for (let i = 0; i < list.length; i += maxLine) pushRow(list.slice(i, i + maxLine))
+  }
+
+  const keyboards = []
+  for (let i = 0; i < rows.length; i += 5) {
+    keyboards.push({
+      type: 'keyboard',
+      content: { rows: rows.slice(i, i + 5) }
+    })
+  }
+  return keyboards
 }
 
 /** 转换文本中的URL为图片 */
