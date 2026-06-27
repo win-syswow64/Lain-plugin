@@ -36,6 +36,7 @@ export class qqbotIdMap extends plugin {
       group_qq: QQBotIdMap.normalizeQQ(e.group_id) || '',
       nickname: e.sender?.card || e.sender?.nickname || e.author?.username || ''
     })
+    if (!mapping?.saved) return await this.reply('绑定失败，映射配置保存失败')
 
     return await this.reply(`QQ（${mapping.qq}）绑定Openid（${QQBotIdMap.stripSelfId(mapping.user_openid)}）`)
   }
@@ -48,13 +49,14 @@ export class qqbotIdMap extends plugin {
     const groupOpenid = this.getGroupOpenid(e)
     if (!groupOpenid) return await this.reply('操作失败，缺少群Openid')
 
-    QQBotIdMap.setGroupEnabled({
+    const state = QQBotIdMap.setGroupEnabled({
       self_id: e.self_id,
       group_openid: groupOpenid,
       enabled,
       group_qq: QQBotIdMap.normalizeQQ(e.group_id) || '',
       group_name: e.group_name || ''
     })
+    if (!state?.saved) return await this.reply('操作失败，转换配置保存失败')
 
     return await this.reply(`${enabled ? '已开启' : '已关闭'}本群QQBot转换`)
   }

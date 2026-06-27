@@ -1,7 +1,7 @@
 import fs from 'fs'
 import path from 'path'
 
-const WAIT_MS = 800
+const WAIT_MS = 2000
 const TIME_TOLERANCE = 2
 const DATA_FILE = path.join(process.cwd(), 'data/lain-plugin/qqbot-openid-map.json')
 
@@ -65,12 +65,18 @@ class QQBotIdMap {
 
   static save () {
     try {
+      if (this.saveTimer) {
+        clearTimeout(this.saveTimer)
+        this.saveTimer = null
+      }
       fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true })
       const tmp = `${DATA_FILE}.tmp`
       fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2))
       fs.renameSync(tmp, DATA_FILE)
+      return true
     } catch (error) {
       logger.error('[QQBotIdMap]保存映射数据失败', error)
+      return false
     }
   }
 
@@ -121,13 +127,14 @@ class QQBotIdMap {
       }
     }
 
-    this.saveSoon()
+    const saved = this.save()
     return {
       self_id,
       user_openid: userOpenid,
       group_openid: groupOpenid,
       qq: userQQ,
-      group_qq: groupQQ
+      group_qq: groupQQ,
+      saved
     }
   }
 
@@ -210,6 +217,7 @@ class QQBotIdMap {
     }
 
     this.setPending(qq, pendingQQ, async () => {
+      lain.info(qq.selfId, `QQBot转换未匹配到QQBot事件，fallback放行其它适配器消息: 群 ${qq.groupQQ} 用户 ${qq.userQQ} ${qq.raw}`)
       await qq.emit(qq.event)
     })
     return true
@@ -298,8 +306,11 @@ class QQBotIdMap {
       group_qq,
       group_name
     })
-    this.saveSoon()
-    return this.data.enabled_groups[self_id][groupOpenid]
+    const saved = this.save()
+    return {
+      ...this.data.enabled_groups[self_id][groupOpenid],
+      saved
+    }
   }
 
   static isGroupEnabled (self_id, group_openid) {
