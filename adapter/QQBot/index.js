@@ -12,6 +12,7 @@ import common from '../../lib/common/common.js'
 import Cfg from '../../lib/config/config.js'
 import Button from './plugins.js'
 import QQBotButton from './Button.js'
+import QQBotIdMap from '../../model/qqbot-id-map.js'
 
 lain.DAU = {}
 
@@ -34,8 +35,10 @@ export default class adapterQQBot {
     this.sdk.on('message.group', async (data) => {
       data = await this.message(data, true)
       if (data) {
-        await Bot.emit('message.group', data)
-        await Bot.emit('message', data)
+        await QQBotIdMap.handleQQBotGroupMessage(data, async e => {
+          await Bot.emit('message.group', e)
+          await Bot.emit('message', e)
+        })
       }
     })
     /** 私聊消息 */
@@ -229,6 +232,7 @@ export default class adapterQQBot {
 
   /** 转换格式给云崽处理 */
   async message(data, isGroup) {
+    QQBotIdMap.logDebug(this.id, 'QQBot转换前data', data)
     let { self_id: tinyId, ...e } = data
     const rawGroupId = e.group_openid || e.group_id
     const rawUserId = e.user_id
@@ -371,6 +375,7 @@ export default class adapterQQBot {
     /** 保存消息次数 */
     try { common.recvMsg(e.self_id, e.adapter) } catch { }
     lain.info(this.id, `<群:${e.group_id}><用户:${e.user_id}> -> ${this.messageLog(e.message)}`)
+    QQBotIdMap.logDebug(this.id, 'QQBot转换后data', e)
     /** dau统计 */
     this.msg_count(data)
     return e

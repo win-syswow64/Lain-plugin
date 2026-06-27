@@ -10,6 +10,9 @@ import WeChat4u from './WeChat-Web/index.js'
 import Kook from './Kook/index.js'
 import Discord from './Discord/index.js'
 import Milky from './Milky/index.js'
+import QQBotIdMap from '../model/qqbot-id-map.js'
+
+QQBotIdMap.install()
 
 /** 启动HTTP服务器，加载shamrock、Com微信适配器 */
 WebSocket.start()

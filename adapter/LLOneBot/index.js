@@ -6,6 +6,7 @@ import { WebSocketServer } from 'ws'
 import common from '../../lib/common/common.js'
 import { faceMap, pokeMap } from '../../model/shamrock/face.js'
 import api from './api.js'
+import QQBotIdMap from '../../model/qqbot-id-map.js'
 
 class LLOneBotCore {
   constructor (bot, request) {
@@ -63,7 +64,9 @@ class LLOneBotCore {
   /** 消息事件 */
   async message (data) {
     /** 转置消息后给喵崽 */
-    await Bot.emit('message', await this.ICQQEvent(data))
+    const e = await this.ICQQEvent(data)
+    if (await QQBotIdMap.handleQQGroupMessage(e, async event => await Bot.emit('message', event))) return
+    await Bot.emit('message', e)
   }
 
   /** 自身消息事件 */

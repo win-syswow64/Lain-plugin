@@ -5,6 +5,7 @@ import common from '../../lib/common/common.js'
 import { faceMap, pokeMap } from '../../model/shamrock/face.js'
 import api from './api.js'
 import cfg from '../../../../lib/config/config.js'
+import QQBotIdMap from '../../model/qqbot-id-map.js'
 
 class OneBotV11 {
   constructor (bot, request) { 
@@ -65,6 +66,11 @@ async message (data) {
   const e = await this.ICQQEvent(data)
 
   if (data.message_type === "group") {
+    const handled = await QQBotIdMap.handleQQGroupMessage(e, async event => {
+      await Bot.emit('message.group', event)
+      await Bot.emit('message', event)
+    })
+    if (handled) return
     await Bot.emit('message.group', e)
   } else {
     await Bot.emit('message.private', e)
@@ -1554,7 +1560,6 @@ Bot.on('message', async (e) => {
       e.file.name = e.file.file;
   }
 })
-
 
 
 

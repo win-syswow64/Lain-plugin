@@ -1,5 +1,6 @@
 import Cfg from "../../lib/config/config.js"
 import common from "../../lib/common/common.js"
+import QQBotIdMap from "../../model/qqbot-id-map.js"
 import { WebSocket } from "ws"
 import fs from "node:fs"
 
@@ -482,7 +483,7 @@ export default class MilkyAdapter {
 
       switch (data.event_type) {
         case "message_receive":
-          this.makeMessage(event)
+          this.makeMessage(event).catch(err => Bot.makeLog("error", `Milky消息处理失败: ${err.stack || err.message}`, "Milky"))
           break
 
         case "message_recall":
@@ -509,7 +510,7 @@ export default class MilkyAdapter {
       }
     }
 
-    makeMessage(data) {
+    async makeMessage(data) {
       data.post_type = "message"
       data.message_type = data.message_scene === "group" ? "group" : "private"
       data.user_id = String(data.sender_id)
@@ -558,6 +559,8 @@ export default class MilkyAdapter {
         Bot.makeLog("info", `好友消息：[${user_name || data.user_id}] ${logMsg}`, logUin)
       }
 
+      const emit = async event => Bot.em(`${event.post_type}.${event.message_type}.normal`, event)
+      if (await QQBotIdMap.handleQQGroupMessage(data, emit)) return
       Bot.em(`${data.post_type}.${data.message_type}.normal`, data)
     }
 
