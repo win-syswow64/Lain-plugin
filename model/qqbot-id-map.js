@@ -173,18 +173,20 @@ class QQBotIdMap {
 
     const stored = this.applyStoredMapping(e)
     const qqbot = this.createRecord(e, 'qqbot', emit)
+
+    if (stored.user && stored.group) {
+      this.clearStoredMappedQQRecords(qqbot)
+      this.logDebug(e.self_id, 'QQBot模拟ICQQ data', e)
+      await emit(e)
+      this.rememberQQBotEmit(qqbot)
+      return true
+    }
+
     const qq = this.findMatchedRecord(qqbot, pendingQQ)
 
     if (qq) {
       this.clearRecord(qq, pendingQQ)
       await this.bindAndEmit(qqbot, qq)
-      return true
-    }
-
-    if (stored.user && stored.group) {
-      this.logDebug(e.self_id, 'QQBot模拟ICQQ data', e)
-      await emit(e)
-      this.rememberQQBotEmit(qqbot)
       return true
     }
 
@@ -207,6 +209,7 @@ class QQBotIdMap {
     }
 
     const qq = this.createRecord(e, 'qq', emit)
+    if (this.hasStoredMappingForQQRecord(qq)) return true
     if (this.findMatchedRecord(qq, recentQQBot)) return true
 
     const qqbot = this.findMatchedRecord(qq, pendingQQBot)
@@ -437,6 +440,36 @@ class QQBotIdMap {
     record.key = key
     recentQQBot.set(key, record)
     setTimeout(() => recentQQBot.delete(key), WAIT_MS * 3)
+  }
+
+  static clearStoredMappedQQRecords (qqbot) {
+    for (const qq of pendingQQ.values()) {
+      if (!this.isStoredMappedPair(qqbot, qq)) continue
+      this.clearRecord(qq, pendingQQ)
+    }
+  }
+
+  static isStoredMappedPair (qqbot, qq) {
+    if (!qqbot?.userQQ || !qqbot?.groupQQ || !qq?.userQQ || !qq?.groupQQ) return false
+    return qqbot.userQQ === qq.userQQ && qqbot.groupQQ === qq.groupQQ
+  }
+
+  static hasStoredMappingForQQRecord (record) {
+    this.load()
+    if (!record?.userQQ || !record?.groupQQ) return false
+
+    const groups = this.findGroupsByQQAny(record.groupQQ).filter(group => {
+      return this.isGroupEnabled(group.self_id, group.group_openid)
+    })
+    if (!groups.length) return false
+
+    return groups.some(group => {
+      const user = this.findUserByQQ(group.self_id, record.userQQ, {
+        groupOpenid: group.group_openid,
+        groupQQ: record.groupQQ
+      })
+      return !!user?.groups?.[group.group_openid]
+    })
   }
 
   static findGroupByQQ (self_id, group_qq) {
