@@ -36,6 +36,7 @@ export default class adapterQQBot {
       data = await this.message(data, true)
       if (data) {
         await QQBotIdMap.handleQQBotGroupMessage(data, async e => {
+          QQBotIdMap.logInfo(this.id, 'QQBot传入云崽message.group', e)
           await Bot.emit('message.group', e)
           await Bot.emit('message', e)
         })
@@ -429,6 +430,11 @@ export default class adapterQQBot {
     if (normalizedBase) {
       const repeated = new RegExp(`^(?:${this.escapeRegExp(normalizedBase)}\\s*)+$`)
       if (repeated.test(text)) return normalizedBase
+      const atPrefix = text.match(/^((?:@\d+\s*)+)(?=\S)/)
+      if (atPrefix) {
+        const body = text.slice(atPrefix[0].length).trim()
+        if (repeated.test(body)) return atPrefix[0] + normalizedBase
+      }
     }
     return text
   }
@@ -1043,7 +1049,8 @@ export default class adapterQQBot {
     try {
       this.send_count()
       logger.debug('发送回复消息：', JSON.stringify(msg))
-      msg = Array.isArray(msg) ? [{ type: 'reply', id: e.message_id }, ...msg] : [{ type: 'reply', id: e.message_id }, msg]
+      const replyId = e.qqbot_message_id || e.message_id
+      msg = Array.isArray(msg) ? [{ type: 'reply', id: replyId }, ...msg] : [{ type: 'reply', id: replyId }, msg]
       if (!e.friend) {
         return { ok: true, data: await this.sdk.sendGroupMessage(e.data.group_id, msg, this.sdk) }
       } else {

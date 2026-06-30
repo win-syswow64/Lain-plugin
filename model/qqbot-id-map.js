@@ -24,7 +24,7 @@ class QQBotIdMap {
     this.load()
     Bot.QQBotIdMap = this
     Bot.QQToOpenid = async (id, e = {}, type = 'user') => {
-      const self_id = String(e.self_id || e.bot?.uin || e.bot?.config?.appid || '')
+      const self_id = String(e.qqbot_self_id || e.qqbot_appid || e.bot?.config?.appid || e.self_id || e.bot?.uin || '')
       if (!self_id || id == null) return this.stripSelfId(id)
 
       if (type === 'group') {
@@ -80,7 +80,7 @@ class QQBotIdMap {
     }
   }
 
-  static bind ({ self_id, user_openid, group_openid, qq, group_qq, nickname = '', group_name = '' }) {
+  static bind ({ self_id, user_openid, group_openid, qq, group_qq, nickname = '', group_name = '', qq_self_id = '', qq_adapter = '' }) {
     this.load()
     self_id = String(self_id || '')
     if (!self_id) return null
@@ -89,6 +89,8 @@ class QQBotIdMap {
     const groupOpenid = this.normalizeOpenid(group_openid, self_id)
     const userQQ = this.normalizeQQ(qq)
     const groupQQ = this.normalizeQQ(group_qq)
+    const qqSelfId = this.normalizeQQ(qq_self_id)
+    const qqAdapter = String(qq_adapter || '').trim()
     const now = Date.now()
 
     if (!this.data.users[self_id]) this.data.users[self_id] = {}
@@ -101,6 +103,8 @@ class QQBotIdMap {
         group_openid: groupOpenid,
         group_qq: groupQQ || old.group_qq || null,
         group_name: group_name || old.group_name || '',
+        qq_self_id: qqSelfId || old.qq_self_id || null,
+        qq_adapter: qqAdapter || old.qq_adapter || '',
         created_at: old.created_at || now,
         updated_at: now
       }
@@ -113,6 +117,8 @@ class QQBotIdMap {
         groups[groupOpenid] = {
           group_openid: groupOpenid,
           group_qq: groupQQ || groups[groupOpenid]?.group_qq || null,
+          qq_self_id: qqSelfId || groups[groupOpenid]?.qq_self_id || null,
+          qq_adapter: qqAdapter || groups[groupOpenid]?.qq_adapter || '',
           updated_at: now
         }
       }
@@ -121,6 +127,8 @@ class QQBotIdMap {
         user_openid: userOpenid,
         qq: userQQ,
         nickname: nickname || old.nickname || '',
+        qq_self_id: qqSelfId || old.qq_self_id || null,
+        qq_adapter: qqAdapter || old.qq_adapter || '',
         groups,
         created_at: old.created_at || now,
         updated_at: now
@@ -134,6 +142,8 @@ class QQBotIdMap {
       group_openid: groupOpenid,
       qq: userQQ,
       group_qq: groupQQ,
+      qq_self_id: qqSelfId,
+      qq_adapter: qqAdapter,
       saved
     }
   }
@@ -147,16 +157,21 @@ class QQBotIdMap {
     const groupOpenid = this.normalizeOpenid(e.group_openid || e.group_id, self_id)
     const user = this.data.users[self_id]?.[userOpenid]
     const group = this.data.groups[self_id]?.[groupOpenid]
+    const userGroup = user?.groups?.[groupOpenid] || {}
 
     this.applyQQMapping(e, {
       qq: user?.qq || null,
-      group_qq: group?.group_qq || user?.groups?.[groupOpenid]?.group_qq || null,
-      nickname: user?.nickname || ''
+      group_qq: group?.group_qq || userGroup.group_qq || null,
+      nickname: user?.nickname || '',
+      group_name: group?.group_name || '',
+      qq_self_id: group?.qq_self_id || userGroup.qq_self_id || user?.qq_self_id || null,
+      qq_adapter: group?.qq_adapter || userGroup.qq_adapter || user?.qq_adapter || ''
     })
 
     return {
       user: !!user?.qq,
-      group: !!(group?.group_qq || user?.groups?.[groupOpenid]?.group_qq)
+      group: !!(group?.group_qq || userGroup.group_qq),
+      mentions: this.applyStoredAtMappings(e, self_id, groupOpenid)
     }
   }
 
@@ -171,10 +186,12 @@ class QQBotIdMap {
       return true
     }
 
-    const stored = this.applyStoredMapping(e)
     const qqbot = this.createRecord(e, 'qqbot', emit)
+    const stored = this.applyStoredMapping(e)
 
-    if (stored.user && stored.group) {
+    if (stored.user && stored.group && stored.mentions) {
+      qqbot.userQQ = this.normalizeQQ(e.user_id)
+      qqbot.groupQQ = this.normalizeQQ(e.group_id)
       this.clearStoredMappedQQRecords(qqbot)
       this.logDebug(e.self_id, 'QQBot模拟ICQQ data', e)
       await emit(e)
@@ -209,7 +226,6 @@ class QQBotIdMap {
     }
 
     const qq = this.createRecord(e, 'qq', emit)
-    if (this.hasStoredMappingForQQRecord(qq)) return true
     if (this.findMatchedRecord(qq, recentQQBot)) return true
 
     const qqbot = this.findMatchedRecord(qq, pendingQQBot)
@@ -218,6 +234,8 @@ class QQBotIdMap {
       await this.bindAndEmit(qqbot, qq)
       return true
     }
+
+    if (this.hasStoredMappingForQQRecord(qq)) return true
 
     this.setPending(qq, pendingQQ, async () => {
       lain.info(qq.selfId, `QQBot转换未匹配到QQBot事件，fallback放行其它适配器消息: 群 ${qq.groupQQ} 用户 ${qq.userQQ} ${qq.raw}`)
@@ -234,13 +252,21 @@ class QQBotIdMap {
       qq: qq.userQQ,
       group_qq: qq.groupQQ,
       nickname: qq.nickname || qqbot.nickname,
-      group_name: qq.groupName
+      group_name: qq.groupName,
+      qq_self_id: qq.selfId,
+      qq_adapter: qq.event?.adapter || qq.event?.bot?.adapter || ''
     })
+    const mentionMappings = this.bindMentionMappings(qqbot, qq)
 
     this.applyQQMapping(qqbot.event, {
       qq: mapping.qq || qq.userQQ,
       group_qq: mapping.group_qq || qq.groupQQ,
-      nickname: qq.nickname || qqbot.nickname
+      nickname: qq.nickname || qqbot.nickname,
+      mentions: mentionMappings,
+      group_name: qq.groupName,
+      qq_self_id: mapping.qq_self_id || qq.selfId,
+      qq_adapter: mapping.qq_adapter || qq.event?.adapter || qq.event?.bot?.adapter || '',
+      source_event: qq.event
     })
     this.logDebug(qqbot.selfId, 'QQBot模拟ICQQ data', qqbot.event)
 
@@ -252,8 +278,11 @@ class QQBotIdMap {
   static applyQQMapping (e, mapping) {
     const qq = this.normalizeQQ(mapping.qq)
     const groupQQ = this.normalizeQQ(mapping.group_qq)
+    const mentions = mapping.mentions || {}
     const openidUserId = e.openid_user_id || e.user_id
     const openidGroupId = e.openid_group_id || e.group_id
+
+    this.applyICQQEventShape(e, mapping, { openidUserId, openidGroupId })
 
     e.openid_user_id = openidUserId
     e.openid_group_id = openidGroupId
@@ -280,11 +309,403 @@ class QQBotIdMap {
 
     if (mapping.nickname) {
       if (!e.sender) e.sender = {}
-      e.sender.nickname = mapping.nickname
-      e.sender.card = mapping.nickname
+      e.sender.nickname = e.sender.nickname || mapping.nickname
+      if (!mapping.source_event || e.sender.card == null) e.sender.card = e.sender.card || mapping.nickname
     }
 
+    this.fillICQQIdentityFields(e, { qq, groupQQ, nickname: mapping.nickname })
+    this.applyAtMappings(e, mentions)
+    this.finalizeICQQMessageFields(e)
+    this.attachICQQRuntimeApis(e, { qq, groupQQ })
     this.cacheBotRoute(e, qq, groupQQ, openidUserId, openidGroupId)
+  }
+
+  static applyICQQEventShape (e, mapping = {}, context = {}) {
+    const source = mapping.source_event || null
+    const qqSelfId = this.normalizeQQ(mapping.qq_self_id || source?.self_id || source?.uin || source?.bot?.uin)
+    const qqAdapter = String(mapping.qq_adapter || source?.adapter || source?.bot?.adapter || '').trim()
+    const originalSelfId = String(e.qqbot_self_id || e.qqbot_appid || e.self_id || e.bot?.config?.appid || '')
+
+    e.qqbot_self_id = originalSelfId
+    e.qqbot_appid = originalSelfId
+    e.qqbot_adapter = e.qqbot_adapter || e.adapter || 'QQBot'
+    e.qqbot_bot = e.qqbot_bot || e.bot
+    e.qqbot_message_id = e.qqbot_message_id || e.message_id
+
+    if (source) {
+      for (const key of ['time', 'message_id', 'message_seq', 'message_type', 'font', 'sub_type', 'message_format', 'post_type', 'raw_pb', 'group_name']) {
+        if (source[key] !== undefined) e[key] = source[key]
+      }
+      for (const key of ['sender', 'member', 'group']) {
+        if (source[key] !== undefined) e[key] = this.clonePlain(source[key])
+      }
+    }
+
+    if (qqSelfId) {
+      e.self_id = qqSelfId
+      e.uin = qqSelfId
+      e.bot = Bot?.[qqSelfId] || source?.bot || e.bot
+    }
+
+    if (qqAdapter || qqSelfId) e.adapter = qqAdapter || 'OneBotV11'
+
+    e.post_type = e.post_type || 'message'
+    e.message_type = e.message_type || 'group'
+    e.sub_type = e.sub_type || 'normal'
+    e.message_format = 'array'
+    e.font = e.font ?? 14
+    e.raw_pb = e.raw_pb ?? ''
+
+    if (mapping.group_name && (!e.group_name || this.isQQBotOpenidText(e.group_name))) {
+      e.group_name = mapping.group_name
+    }
+
+    if (!e.sender) e.sender = {}
+    if (!e.member && e.message_type === 'group') e.member = {}
+    if (!e.group && e.message_type === 'group') e.group = {}
+  }
+
+  static fillICQQIdentityFields (e, { qq, groupQQ, nickname = '' } = {}) {
+    const selfId = this.normalizeQQ(e.self_id || e.uin)
+    if (selfId) {
+      e.self_id = selfId
+      e.uin = selfId
+    }
+
+    if (!e.sender) e.sender = {}
+    if (qq) {
+      e.user_id = qq
+      e.sender.user_id = qq
+      e.sender.qq = qq
+    }
+    if (groupQQ) {
+      e.group_id = groupQQ
+      e.sender.group_id = groupQQ
+    }
+
+    const senderName = e.sender.nickname || e.sender.card || nickname || ''
+    e.sender.nickname = e.sender.nickname ?? senderName
+    e.sender.card = e.sender.card ?? ''
+    e.sender.role = e.sender.role || 'member'
+    e.sender.level = e.sender.level == null ? '1' : e.sender.level
+    e.sender.title = e.sender.title || ''
+
+    if (e.message_type !== 'group') return
+
+    const oldMember = e.member || {}
+    const member = {
+      group_id: groupQQ || oldMember.group_id,
+      user_id: qq || oldMember.user_id,
+      nickname: oldMember.nickname || senderName,
+      card: oldMember.card ?? e.sender.card ?? '',
+      card_or_nickname: oldMember.card_or_nickname || oldMember.card || senderName,
+      sex: oldMember.sex || 'unknown',
+      age: oldMember.age || 0,
+      area: oldMember.area || '',
+      level: oldMember.level == null ? e.sender.level : oldMember.level,
+      qq_level: oldMember.qq_level || 0,
+      join_time: oldMember.join_time || 0,
+      last_sent_time: oldMember.last_sent_time || 0,
+      title_expire_time: oldMember.title_expire_time || 0,
+      unfriendly: oldMember.unfriendly || false,
+      card_changeable: oldMember.card_changeable ?? true,
+      is_robot: oldMember.is_robot || false,
+      shut_up_timestamp: oldMember.shut_up_timestamp || 0,
+      role: oldMember.role || e.sender.role || 'member',
+      title: oldMember.title || e.sender.title || '',
+      uin: oldMember.uin || selfId,
+      ...oldMember
+    }
+    member.group_id = groupQQ || member.group_id
+    member.user_id = qq || member.user_id
+    member.info = {
+      group_id: member.group_id,
+      user_id: member.user_id,
+      nickname: member.nickname,
+      card: member.card,
+      card_or_nickname: member.card_or_nickname,
+      sex: member.sex,
+      age: member.age,
+      area: member.area,
+      level: member.level,
+      qq_level: member.qq_level,
+      join_time: member.join_time,
+      last_sent_time: member.last_sent_time,
+      title_expire_time: member.title_expire_time,
+      unfriendly: member.unfriendly,
+      card_changeable: member.card_changeable,
+      is_robot: member.is_robot,
+      shut_up_timestamp: member.shut_up_timestamp,
+      role: member.role,
+      title: member.title,
+      uin: member.uin,
+      ...(oldMember.info || {})
+    }
+    member.info.group_id = member.group_id
+    member.info.user_id = member.user_id
+    member.is_admin = member.is_admin ?? (member.role === 'admin' || member.role === 'owner')
+    member.is_owner = member.is_owner ?? (member.role === 'owner')
+    e.member = member
+
+    e.group = {
+      ...(e.group || {}),
+      name: e.group?.name || e.group_name || String(groupQQ || ''),
+      is_admin: e.group?.is_admin ?? false,
+      is_owner: e.group?.is_owner ?? false
+    }
+  }
+
+  static attachICQQRuntimeApis (e, { qq, groupQQ } = {}) {
+    const selfId = this.normalizeQQ(e.self_id || e.uin)
+    const bot = selfId ? Bot?.[selfId] : null
+    const isGroup = e.message_type === 'group' && !!groupQQ
+
+    e.isGroup = isGroup
+    e.isPrivate = e.message_type === 'private'
+    e.at = this.getFirstAtQQ(e.message)
+    e.img = this.getImageUrls(e.message)
+
+    if (qq) {
+      e.getAvatarUrl = (size = 0) => `https://q1.qlogo.cn/g?b=qq&s=${size}&nk=${qq}`
+    }
+
+    if (isGroup) {
+      const pickedGroup = typeof bot?.pickGroup === 'function' ? bot.pickGroup(groupQQ) : null
+      e.group = this.mergeApiObject(e.group, pickedGroup)
+      e.group_id = groupQQ
+      e.group_name = e.group_name || e.group?.name || String(groupQQ)
+      if (typeof e.group?.getMemberMap !== 'function') {
+        e.group.getMemberMap = async () => new Map()
+      }
+      if (typeof e.group?.getChatHistory !== 'function') {
+        e.group.getChatHistory = async () => []
+      }
+      if (typeof e.group?.pickMember !== 'function') {
+        e.group.pickMember = userId => bot?.pickMember?.(groupQQ, userId) || {}
+      }
+    } else if (qq) {
+      const pickedFriend = typeof bot?.pickFriend === 'function' ? bot.pickFriend(qq) : null
+      e.friend = this.mergeApiObject(e.friend, pickedFriend)
+      if (typeof e.friend?.getChatHistory !== 'function') {
+        e.friend.getChatHistory = async () => []
+      }
+    }
+
+    if (!e.source) e.source = this.getReplySource(e)
+  }
+
+  static mergeApiObject (base, api) {
+    return {
+      ...(base || {}),
+      ...(api || {})
+    }
+  }
+
+  static getFirstAtQQ (message) {
+    const item = Array.isArray(message) ? message.find(item => item?.type === 'at') : null
+    return this.normalizeQQ(item?.qq || item?.id || item?.user_id || item?.data?.qq || item?.data?.id || item?.data?.user_id) || undefined
+  }
+
+  static getImageUrls (message) {
+    if (!Array.isArray(message)) return []
+    return message
+      .filter(item => item?.type === 'image')
+      .map(item => item.url || item.file || item.data?.url || item.data?.file)
+      .filter(Boolean)
+  }
+
+  static getReplySource (e) {
+    const reply = Array.isArray(e.message) ? e.message.find(item => item?.type === 'reply') : null
+    const id = reply?.id || reply?.data?.id
+    if (!id) return e.source
+    return {
+      id,
+      seq: this.normalizeQQ(id) || id,
+      time: this.normalizeQQ(id) || id
+    }
+  }
+
+  static bindMentionMappings (qqbot, qq) {
+    const ret = {}
+    const count = Math.min(qqbot.ats.length, qq.ats.length)
+    for (let index = 0; index < count; index++) {
+      const userOpenid = this.normalizeOpenid(qqbot.ats[index]?.id, qqbot.selfId)
+      const userQQ = this.normalizeQQ(qq.ats[index]?.id)
+      if (!userOpenid || !userQQ) continue
+
+      const mapping = this.bind({
+        self_id: qqbot.selfId,
+        user_openid: userOpenid,
+        group_openid: qqbot.groupOpenid,
+        qq: userQQ,
+        group_qq: qq.groupQQ,
+        nickname: qq.ats[index]?.text || qqbot.ats[index]?.text || '',
+        group_name: qq.groupName,
+        qq_self_id: qq.selfId,
+        qq_adapter: qq.event?.adapter || qq.event?.bot?.adapter || ''
+      })
+      if (mapping?.qq) ret[this.normalizeMappedOpenid(userOpenid)] = mapping.qq
+    }
+    return ret
+  }
+
+  static applyStoredAtMappings (e, self_id, groupOpenid) {
+    const mentions = {}
+    for (const item of this.getAtList(e, 'qqbot')) {
+      const userOpenid = this.normalizeOpenid(item.id, self_id)
+      if (!userOpenid) return false
+
+      const user = this.data.users[self_id]?.[userOpenid]
+      const qq = this.normalizeQQ(user?.qq)
+      if (!qq || !user?.groups?.[groupOpenid]) return false
+      mentions[this.normalizeMappedOpenid(userOpenid)] = qq
+    }
+
+    this.applyAtMappings(e, mentions)
+    return true
+  }
+
+  static applyAtMappings (e, mentions = {}) {
+    if (!mentions || !Object.keys(mentions).length) return
+
+    if (Array.isArray(e.message)) {
+      e.message = this.convertAtMessage(e.message, mentions)
+    }
+
+    e.raw_message = this.convertAtText(e.raw_message, mentions)
+
+    if (Array.isArray(e.message) && this.hasAtSegment(e.message)) {
+      const raw = this.buildRawMessageFromSegments(e.message)
+      if (raw) e.raw_message = raw
+    }
+
+    // ⭐ 新增：清理 @数字ID 结构
+    const cleanText = (text) => {
+      if (!text) return text
+      return text.replace(/@\d+/g, '') // 去掉 @3889011960 这种
+    }
+
+    const finalMsg = cleanText(e.raw_message)
+
+    // 关键：写入 msg 时用清理后的文本
+    if (Object.getOwnPropertyDescriptor(e, 'msg')?.set) {
+      e.msg = finalMsg
+    }
+  }
+
+  static finalizeICQQMessageFields (e) {
+    if (!Array.isArray(e.message)) e.message = []
+    for (const item of e.message) {
+      if (item && item.text === undefined) item.text = ''
+    }
+
+    if (this.hasAtSegment(e.message)) {
+      const raw = this.buildRawMessageFromSegments(e.message)
+      if (raw) {
+        e.raw_message = raw
+        e.log_message = raw
+        if (Object.getOwnPropertyDescriptor(e, 'msg')?.set) e.msg = this.buildMsgTextFromSegments(e.message) || raw
+      }
+    } else {
+      e.raw_message = String(e.raw_message || e.msg || '').trim()
+      e.log_message = e.log_message || e.raw_message
+    }
+  }
+
+  static hasAtSegment (message) {
+    return Array.isArray(message) && message.some(item => item?.type === 'at')
+  }
+
+  static buildRawMessageFromSegments (message) {
+    if (!Array.isArray(message)) return ''
+    return message.map(item => {
+      if (!item) return ''
+      if (item.type === 'at') return `@${item.qq || item.id || item.user_id || item.data?.qq || ''}`
+      if (item.type === 'text') return item.text || item.data?.text || ''
+      if (item.type === 'face') return `[${item.text || item.name || item.id || item.data?.id || '表情'}]`
+      if (item.type === 'image') return '[图片]'
+      if (item.type === 'record' || item.type === 'audio') return '[语音]'
+      if (item.type === 'video') return '[视频]'
+      if (item.type === 'file') return '[文件]'
+      return item.text || item.data?.text || ''
+    }).join('')
+  }
+
+  static buildMsgTextFromSegments (message) {
+    if (!Array.isArray(message)) return ''
+    return message
+      .filter(item => item?.type !== 'at' && item?.type !== 'reply')
+      .map(item => item?.type === 'text' ? item.text || item.data?.text || '' : item?.text || item?.data?.text || '')
+      .join('')
+      .trim()
+  }
+
+  static convertAtMessage (message, mentions) {
+    const ret = []
+    for (const item of message) {
+      if (item?.type === 'at') {
+        const id = this.normalizeMappedOpenid(item.qq || item.id || item.user_id || item.data?.qq || item.data?.id || item.data?.user_id)
+        const qq = this.normalizeQQ(mentions[id])
+        ret.push(qq ? this.normalizeAtSegment({ ...item, qq, id: qq, user_id: qq, text: item.text || '' }, qq) : item)
+        continue
+      }
+
+      if (item?.type === 'text') {
+        ret.push(...this.convertAtTextSegment(item, mentions))
+        continue
+      }
+
+      ret.push(item)
+    }
+    return ret
+  }
+
+  static convertAtTextSegment (item, mentions) {
+    const text = String(item.text || item.data?.text || '')
+    const parts = this.splitAtText(text, mentions)
+    if (parts.length === 1 && parts[0].type === 'text') return [{ ...item, text: parts[0].text }]
+    return parts.map(part => part.type === 'text' ? { type: 'text', text: part.text } : this.normalizeAtSegment({ type: 'at', qq: part.qq, text: '' }, part.qq))
+  }
+
+  static splitAtText (text, mentions) {
+    const ret = []
+    const regex = /<@!?([^>]+)>/g
+    let lastIndex = 0
+    let match
+    while ((match = regex.exec(text))) {
+      if (match.index > lastIndex) ret.push({ type: 'text', text: text.slice(lastIndex, match.index) })
+      const openid = this.normalizeMappedOpenid(match[1])
+      const qq = this.normalizeQQ(mentions[openid])
+      ret.push(qq ? { type: 'at', qq } : { type: 'text', text: match[0] })
+      lastIndex = regex.lastIndex
+    }
+    if (lastIndex < text.length) ret.push({ type: 'text', text: text.slice(lastIndex) })
+    return ret
+  }
+
+  static convertAtText (text, mentions) {
+    if (!text) return text
+    return this.splitAtText(String(text), mentions)
+      .map(item => item.type === 'at' ? `@${item.qq}` : item.text)
+      .join('')
+  }
+
+  static normalizeAtSegment (item, qq = item?.qq) {
+    qq = this.normalizeQQ(qq || item?.id || item?.user_id || item?.data?.qq || item?.data?.id || item?.data?.user_id)
+    if (!qq) return item
+    return {
+      ...item,
+      type: 'at',
+      qq,
+      id: qq,
+      user_id: qq,
+      text: item?.text || '',
+      data: {
+        ...(item?.data || {}),
+        qq
+      },
+      at: qq
+    }
   }
 
   static setGroupEnabled ({ self_id, group_openid, enabled, group_qq = '', group_name = '' }) {
@@ -390,7 +811,7 @@ class QQBotIdMap {
       event: e,
       emit,
       selfId,
-      raw: this.normalizeText(e.data?.raw_message || e.data?.content || e.raw_message || e.msg),
+      raw: this.getComparableRaw(e),
       nickname: this.getNickname(e),
       groupName: e.group_name || e.data?.group_name || '',
       time: Number(e.time || e.timestamp || e.data?.timestamp || 0),
@@ -398,6 +819,7 @@ class QQBotIdMap {
       groupQQ: this.normalizeQQ(e.group_id),
       userOpenid: e.user_openid || e.member_openid || e.sender?.user_openid || e.sender?.member_openid || e.user_id,
       groupOpenid: e.group_openid || e.sender?.group_openid || e.group_id,
+      ats: this.getAtList(e, source),
       timer: null
     }
   }
@@ -468,7 +890,15 @@ class QQBotIdMap {
         groupOpenid: group.group_openid,
         groupQQ: record.groupQQ
       })
-      return !!user?.groups?.[group.group_openid]
+      if (!user?.groups?.[group.group_openid]) return false
+
+      return record.ats.every(item => {
+        const atUser = this.findUserByQQ(group.self_id, item.id, {
+          groupOpenid: group.group_openid,
+          groupQQ: record.groupQQ
+        })
+        return !!atUser?.groups?.[group.group_openid]
+      })
     })
   }
 
@@ -563,8 +993,95 @@ class QQBotIdMap {
     return parts[1] || parts[0] || ''
   }
 
+  static normalizeMappedOpenid (value) {
+    return String(value || '').trim().split('-').pop() || ''
+  }
+
+  static isQQBotOpenidText (value) {
+    return /^\d+-[^-\s]+$/.test(String(value || '').trim())
+  }
+
+  static clonePlain (value) {
+    if (value == null || typeof value !== 'object') return value
+    try {
+      return JSON.parse(JSON.stringify(value, (key, item) => {
+        if (typeof item === 'function') return undefined
+        return item
+      }))
+    } catch {
+      return Array.isArray(value) ? [...value] : { ...value }
+    }
+  }
+
   static normalizeText (text) {
     return String(text || '').replace(/\s+/g, ' ').trim()
+  }
+
+  static getAtList (e, source = '') {
+    const message = Array.isArray(e.message) ? e.message : Array.isArray(e.data?.message) ? e.data.message : []
+    const ret = []
+
+    for (const item of message) {
+      if (item?.type === 'at') {
+        const id = item.qq || item.id || item.user_id || item.data?.qq || item.data?.id || item.data?.user_id
+        if (id != null) ret.push({ id: String(id), text: String(item.text || item.data?.text || '') })
+        continue
+      }
+
+      if (source === 'qqbot' && item?.type === 'text') {
+        const text = String(item.text || item.data?.text || '')
+        for (const match of text.matchAll(/<@!?([^>]+)>/g)) {
+          ret.push({ id: match[1], text: '' })
+        }
+      }
+    }
+
+    if (source === 'qqbot' && !ret.length) {
+      const text = String(e.data?.content || e.raw_message || e.msg || '')
+      for (const match of text.matchAll(/<@!?([^>]+)>/g)) {
+        ret.push({ id: match[1], text: '' })
+      }
+    }
+
+    return ret
+  }
+
+  static getComparableRaw (e) {
+    const message = Array.isArray(e.message) ? e.message : Array.isArray(e.data?.message) ? e.data.message : []
+    const hasAt = message.some(item => item?.type === 'at')
+
+    if (hasAt && message.every(item => item?.type === 'at' || item?.type === 'text')) {
+      const text = message
+        .filter(item => item?.type !== 'at')
+        .map(item => this.getComparableSegmentText(item))
+        .join('')
+      const normalized = this.normalizeText(text)
+      if (normalized) return normalized
+    }
+
+    let raw = this.normalizeText(e.data?.raw_message || e.data?.content || e.raw_message || e.msg)
+      .replace(/<@!?[^>]+>/g, '')
+      .trim()
+    if (!hasAt) return raw
+
+    for (const item of message) {
+      if (item?.type !== 'at') continue
+      const id = String(item.qq || item.id || item.user_id || item.data?.qq || item.data?.id || item.data?.user_id || '').trim()
+      const text = String(item.text || item.data?.text || '').trim()
+      if (id) raw = raw.replace(new RegExp(`@${this.escapeRegExp(id)}\\s*`, 'g'), '')
+      if (text) raw = raw.replace(new RegExp(`@${this.escapeRegExp(text)}\\s*`, 'g'), '')
+    }
+    return this.normalizeText(raw)
+  }
+
+  static getComparableSegmentText (item) {
+    if (!item) return ''
+    if (item.type === 'text') return item.text || item.data?.text || ''
+    return `[${item.type}]`
+  }
+
+  static escapeRegExp (text) {
+    return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   }
 
   static getNickname (e) {
