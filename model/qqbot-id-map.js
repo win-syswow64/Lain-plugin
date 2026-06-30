@@ -148,7 +148,7 @@ class QQBotIdMap {
     }
   }
 
-  static applyStoredMapping (e) {
+  static getStoredMapping (e) {
     this.load()
     const self_id = String(e.self_id || '')
     if (!self_id) return { user: false, group: false }
@@ -158,20 +158,41 @@ class QQBotIdMap {
     const user = this.data.users[self_id]?.[userOpenid]
     const group = this.data.groups[self_id]?.[groupOpenid]
     const userGroup = user?.groups?.[groupOpenid] || {}
-
-    this.applyQQMapping(e, {
+    const mapping = {
       qq: user?.qq || null,
       group_qq: group?.group_qq || userGroup.group_qq || null,
       nickname: user?.nickname || '',
       group_name: group?.group_name || '',
       qq_self_id: group?.qq_self_id || userGroup.qq_self_id || user?.qq_self_id || null,
       qq_adapter: group?.qq_adapter || userGroup.qq_adapter || user?.qq_adapter || ''
-    })
+    }
+    const mentionMappings = this.getStoredAtMappings(e, self_id, groupOpenid)
+    const mentionsReady = mentionMappings !== false
 
     return {
-      user: !!user?.qq,
-      group: !!(group?.group_qq || userGroup.group_qq),
-      mentions: this.applyStoredAtMappings(e, self_id, groupOpenid)
+      user: !!mapping.qq,
+      group: !!mapping.group_qq,
+      mentions: mentionsReady,
+      mapping: {
+        ...mapping,
+        mentions: mentionsReady ? mentionMappings : {}
+      }
+    }
+  }
+
+  static applyStoredMapping (e) {
+    const stored = this.getStoredMapping(e)
+    if (stored.user && stored.group && stored.mentions) {
+      this.applyQQMapping(e, stored.mapping)
+      return {
+        ...stored,
+        applied: true
+      }
+    }
+
+    return {
+      ...stored,
+      applied: false
     }
   }
 
@@ -209,7 +230,7 @@ class QQBotIdMap {
 
     this.setPending(qqbot, pendingQQBot, async () => {
       const fallbackStored = this.applyStoredMapping(qqbot.event)
-      if (fallbackStored.user || fallbackStored.group) this.logDebug(qqbot.selfId, 'QQBot模拟ICQQ data', qqbot.event)
+      if (fallbackStored.applied) this.logDebug(qqbot.selfId, 'QQBot模拟ICQQ data', qqbot.event)
       await qqbot.emit(qqbot.event)
       this.rememberQQBotEmit(this.createRecord(qqbot.event, 'qqbot', qqbot.emit))
     })
@@ -549,7 +570,7 @@ class QQBotIdMap {
     return ret
   }
 
-  static applyStoredAtMappings (e, self_id, groupOpenid) {
+  static getStoredAtMappings (e, self_id, groupOpenid) {
     const mentions = {}
     for (const item of this.getAtList(e, 'qqbot')) {
       const userOpenid = this.normalizeOpenid(item.id, self_id)
@@ -561,8 +582,7 @@ class QQBotIdMap {
       mentions[this.normalizeMappedOpenid(userOpenid)] = qq
     }
 
-    this.applyAtMappings(e, mentions)
-    return true
+    return mentions
   }
 
   static applyAtMappings (e, mentions = {}) {
