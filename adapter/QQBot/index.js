@@ -1,6 +1,7 @@
 import { exec } from 'child_process'
 import crypto from 'crypto'
 import fs from 'fs'
+import sizeOf from 'image-size'
 import lodash from 'lodash'
 import fetch from 'node-fetch'
 import path from 'path'
@@ -1788,8 +1789,38 @@ export default class adapterQQBot {
     try {
       /** 自定义图床 */
       if (Bot?.imageToUrl) {
-        const { width, height, url } = await Bot.imageToUrl(file)
-        common.mark('Lain-plugin', `使用自定义图床发送图片：${url}`)
+        const res = await Bot.imageToUrl(file)
+        // 打印一次，方便排查
+        common.mark('Lain-plugin', 'imageToUrl 原始返回: ' + JSON.stringify(res)?.slice(0, 500))
+        
+         // 兼容各种返回结构：字符串 / {url} / {link} / {data:{url}} / {data:{link}}
+        const url = typeof res === 'string'
+          ? res
+          : res?.url || res?.link || res?.data?.url || res?.data?.link
+      
+        if (!url) {
+          logger.error('[Lain-plugin] imageToUrl 未返回有效 URL:', JSON.stringify(res)?.slice(0, 500))
+          const err = new Error('imageToUrl 返回空 URL')
+          err.noFallback = true
+          throw err
+        }
+      
+        // width/height 缺失时，从 buffer 本地计算
+        let width = Number(res?.width) || 0
+        let height = Number(res?.height) || 0
+        if (!width || !height) {
+          try {
+            const buffer = await Bot.Buffer(file)
+            const dim = sizeOf(buffer)
+            width = width || dim.width || 0
+            height = height || dim.height || 0
+            common.mark('Lain-plugin', `本地计算图片尺寸: ${width}x${height}`)
+          } catch (error) {
+            logger.error('[Lain-plugin] 本地计算图片尺寸失败:', error)
+          }
+        }
+      
+        common.mark('Lain-plugin', `使用自定义图床发送图片：${url} (${width}x${height})`)
         return { type, file: url, width, height }
       } else if (Bot?.uploadFile) {
         /** 老接口，后续废除 */
