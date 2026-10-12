@@ -372,11 +372,28 @@ Yz:count:send:image:bot:<机器人ID>:total
 
 ## ws-plugin 群成员列表
 
+Lain-plugin 不再跟踪 `ws-plugin/` 和 `22009-plugin/` 目录，保留已有本地插件及独立仓库；兼容补丁仍随本体维护。
+
 `get_group_member_list` 对 QQBot 只读取目标群已绑定 QQ 的成员，每名成员返回一个对象；其他群成员、没有 QQ 绑定的用户不会进入结果，没有匹配成员时 `data: []`。无需启用成员列表转译开关，也不调用官方成员列表 API。
 
 响应由 ws-plugin 包装为 `{ status: 'ok', retcode: 0, data: [...] }`，保留请求的 echo。字段遵循 OneBot 类型：`group_id/user_id` 为数字，昵称/群名片/角色使用已缓存的资料，其他不支持的字符串使用一个空格、普通数值为 0、布尔值为 false；`join_time/last_sent_time/title_expire_time` 缺失时使用当前 Unix 秒时间戳。
 
 对应兼容补丁在 `patches/ws-plugin-qqbot.patch`，包含 `model/api.js`、`model/makeMsg.js` 和新增的 `model/groupMembers.js`。ws-plugin 是独立 Git 仓库，应将补丁应用到实际安装目录，不能只更新 Lain-plugin 后期待 ws-plugin 文件自动更新。
+
+## 大文件与分片上传
+
+群聊、C2C 私聊共用同一上传入口。普通文件、图片、视频、语音均检查实际字节数，来源支持本地路径、Buffer、base64 和 HTTP/HTTPS URL。阈值按 `5 * 1024 * 1024` 字节（5MiB）计算：不超过阈值使用 `/files` 的 `file_data` 二进制直传；超过阈值一律使用官方分片流程，URL 也先下载核实大小，不仅依赖 Content-Length。
+
+1. 调用对应会话的 `/upload_prepare`，传入 `file_type`、文件名、大小、完整 MD5/SHA1，以及前 10002432 字节的 MD5。
+2. 按返回的分片大小和序号 PUT 到预签名 URL，每片成功后调用 `/upload_part_finish`；失败按服务端给出的重试超时和延迟重试。
+3. 全部分片完成后调用 `/files`，携带 `upload_id` 合并取得 `file_info`；上传阶段使用 `srv_send_msg: false`。
+4. 通过该会话的消息接口发送 `msg_type: 7` 和 `media.file_info`，保留原有的 `msg_id/event_id` 回复上下文。
+
+官方硬限制为 200MiB，超过直接报错。图片/语音超过 20MiB、视频超过 30MiB 时按官方软限制降级为普通文件上传。下载和上传都按实际大小检查，未知长度的 URL 不会绕过限制。
+
+Markdown 中的大图片也分片上传，并使用合并响应的 `raw_url` 显示；遇到软限制降级或没有可用 `raw_url` 时，以附件发送并保留正文提示。legacy 模式的大媒体、普通文件及 C2C 流式回复中的大图片也使用此流程。文件必须可由机器人服务器读取；本地无法下载的 URL 会回复上传失败原因。
+
+协议依据：[官方群富媒体上传](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_files.post.html)、[官方单聊富媒体上传](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_files.post.html)、[群预上传](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_id_upload_prepare.post.html)与[单聊预上传](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_id_upload_prepare.post.html)。
 
 ## 相关文档
 

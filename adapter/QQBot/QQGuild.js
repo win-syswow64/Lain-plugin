@@ -3,7 +3,7 @@ import loader from '../../../../lib/plugins/loader.js'
 import common from '../../lib/common/common.js'
 import Cfg from '../../lib/config/config.js'
 import { faceMap } from '../../model/shamrock/face.js'
-import { getMessagePolicy, getMessageVariants } from './MessagePolicy.js'
+import { getMessagePolicy, getMessageVariants, getSmallSetting } from './MessagePolicy.js'
 
 export default class adapterQQGuild {
   /** 传入基本配置 */
@@ -344,7 +344,7 @@ export default class adapterQQGuild {
     for (const item of Pieces) {
       try {
         lain.debug(`发送回复${info}消息：`, JSON.stringify(item))
-        let res = await this.sendWithMessagePolicy(item, content => data.data.reply(content, quote), common.array(msg).some(p => ['small', 'micro'].includes(p.type)))
+        let res = await this.sendWithMessagePolicy(item, content => data.data.reply(content, quote), getSmallSetting(common.array(msg)))
         res.message_id = res.id
         result ||= res
         lain.debug(`回复${info}消息返回：`, res)
@@ -362,7 +362,7 @@ export default class adapterQQGuild {
     if (options.button) message.push(...this.normalizeButtons(data, options.button))
     else if (options.buttons) message.push(...this.normalizeButtons(data, options.buttons))
     try {
-      const res = await this.sendWithMessagePolicy(message, content => data.data.reply(content, options.quote), options.smallbtn || options.micro)
+      const res = await this.sendWithMessagePolicy(message, content => data.data.reply(content, options.quote), getSmallSetting(options))
       res.message_id = res.id
       return res
     } catch (error) {
@@ -375,7 +375,8 @@ export default class adapterQQGuild {
     return { type: 'markdown', content: await this.makeMarkdownContent(e, data, options) }
   }
 
-  async sendWithMessagePolicy (message, send, small = false) {
+  async sendWithMessagePolicy (message, send, small) {
+    const configuredSmall = getSmallSetting(message)
     const rows = []
     const normalized = common.array(message).filter(item => !['small', 'micro'].includes(item.type)).flatMap(item => {
       if (item.type === 'button') { rows.push({buttons:item.buttons || []}); return [] }
@@ -389,7 +390,8 @@ export default class adapterQQGuild {
       ? [{type:'markdown',content:text},...normalized.filter(item => !['text','at'].includes(item.type))]
       : normalized
     const policy = getMessagePolicy(this.config)
-    if (small) policy.small = true
+    if (configuredSmall !== undefined) policy.small = configuredSmall
+    else if (small !== undefined) policy.small = small
     let lastError
     for (const variant of getMessageVariants(raw, policy, true)) {
       for (let attempt = 0; attempt < variant.attempts; attempt++) {
@@ -443,6 +445,7 @@ export default class adapterQQGuild {
   normalizeButtons(e, input) {
     const result = []
     const pushRow = row => {
+      if (['small', 'micro'].includes(row?.type)) return
       if (row?.type === 'keyboard' && row.content?.rows) {
         for (const item of row.content.rows) pushRow(item)
         return
@@ -458,8 +461,9 @@ export default class adapterQQGuild {
 
       const items = Array.isArray(row) ? row : [row]
       const buttons = []
-      for (const btn of items) {
-        if (!btn) continue
+      for (const rawButton of items) {
+        if (!rawButton) continue
+        const { small, smallbtn, micro, ...btn } = rawButton
         if (btn.render_data && btn.action) {
           buttons.push(btn)
           continue
@@ -708,7 +712,7 @@ export default class adapterQQGuild {
     for (let item of Pieces) {
       try {
         if (reply) item = Array.isArray(item) ? [reply, ...item] : [reply, item]
-        let res = await this.sendWithMessagePolicy(item, content => this.sdk.sendDirectMessage(directData.guild_id, content), common.array(data).some(p => ['small', 'micro'].includes(p.type)))
+        let res = await this.sendWithMessagePolicy(item, content => this.sdk.sendDirectMessage(directData.guild_id, content), getSmallSetting(common.array(data)))
         res.message_id = res.id
         return res
       } catch (error) {
@@ -725,7 +729,7 @@ export default class adapterQQGuild {
     for (let item of Pieces) {
       try {
         if (reply) item = Array.isArray(item) ? [reply, ...item] : [reply, item]
-        let res = await this.sendWithMessagePolicy(item, content => this.sdk.sendGuildMessage(channel_id, content), common.array(data).some(p => ['small', 'micro'].includes(p.type)))
+        let res = await this.sendWithMessagePolicy(item, content => this.sdk.sendGuildMessage(channel_id, content), getSmallSetting(common.array(data)))
         res.message_id = res.id
         return res
       } catch (error) {

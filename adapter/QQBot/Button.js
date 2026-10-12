@@ -1,3 +1,5 @@
+import { getSmallSetting } from './MessagePolicy.js'
+
 /**
  * QQBot Button 工具类
  * 兼容 miao-plugin Button API 风格
@@ -27,7 +29,7 @@ export default class Button {
    *   按钮字段: { text, data?, link?, callback?, input?, send?, style?, admin?, list?, permission?, tips? }
    * @returns {{ type: string, content: { rows: Array }, _isButton: boolean }}
    */
-  static create (rows = []) {
+  static create (rows = [], options = {}) {
     if (!Array.isArray(rows)) rows = [[rows]]
     if (!rows.length) return null
     if (!Array.isArray(rows[0])) rows = [rows]
@@ -43,9 +45,11 @@ export default class Button {
 
     if (!builtRows.length) return null
 
+    const small = getSmallSetting(options) ?? getSmallSetting(rows)
     return {
       type: 'keyboard',
       content: { rows: builtRows },
+      ...(small === undefined ? {} : { small }),
       _isButton: true
     }
   }
@@ -55,8 +59,8 @@ export default class Button {
    * @param {Array} items - 按钮定义数组
    * @returns {{ type: string, content: { rows: Array }, _isButton: boolean }}
    */
-  static nav (items = []) {
-    return Button.create([items])
+  static nav (items = [], options = {}) {
+    return Button.create([items], options)
   }
 
   /**

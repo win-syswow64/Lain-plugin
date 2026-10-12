@@ -15,11 +15,38 @@ export function getMessagePolicy (config = {}) {
   }
 }
 
+/** A setting can live on the extension, rule, returned keyboard, or button definition. */
+export function getSmallSetting (value, seen = new WeakSet()) {
+  if (!value || typeof value !== 'object' || seen.has(value)) return undefined
+  seen.add(value)
+  for (const key of ['small', 'smallbtn', 'micro']) {
+    if (typeof value[key] === 'boolean') return value[key]
+  }
+  if (['small', 'micro'].includes(value.type)) return true
+  if (value.style?.font_size === 'small') return true
+  const children = Array.isArray(value) ? value : ['data', 'buttons', 'button', 'content', 'rows'].map(key => value[key])
+  let setting
+  for (const child of children) {
+    const flag = getSmallSetting(child, seen)
+    if (flag === true) return true
+    if (flag === false) setting = false
+  }
+  return setting
+}
+
 /** Small keyboards use exactly the same wire format as @windtrace/qq-group-bot. */
 export function withMicroKeyboard (message, enabled) {
-  return message.map(item => item?.type === 'keyboard' && enabled
-    ? { ...item, content: { ...item.content, style: { ...item.content?.style, font_size: 'small' } } }
-    : item)
+  return message.map(item => {
+    if (item?.type !== 'keyboard') return item
+    const { small, smallbtn, micro, ...keyboard } = item
+    const style = { ...item.content?.style }
+    if (enabled) style.font_size = 'small'
+    else if (style.font_size === 'small') delete style.font_size
+    const content = { ...item.content }
+    if (Object.keys(style).length) content.style = style
+    else delete content.style
+    return { ...keyboard, content }
+  })
 }
 
 function legacyMarkdown (content, isGroup) {
@@ -75,7 +102,7 @@ export function makeTemplateMessage (message, policy) {
 
 /** Only retry a rejected piece, never a piece that was already sent successfully. */
 export function getMessageVariants (message, policy, isGroup) {
-  const raw = withMicroKeyboard(message, policy.small)
+  const raw = withMicroKeyboard(message, getSmallSetting(message) ?? policy.small)
   const legacy = makeLegacyMessage(message, isGroup)
   if (policy.mode === 'legacy') return [{ mode: 'legacy', message: legacy, attempts: 2 }]
   const template = makeTemplateMessage(raw, policy)

@@ -57,6 +57,8 @@ coverage/
 button.zip
 .22009-plugin/
 .ws-plugin/
+/ws-plugin/
+/22009-plugin/
 Milky.js
 QQBot.js
 

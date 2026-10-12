@@ -13,6 +13,37 @@ await e.markdown('请选择操作', { buttons: [[{ label: '帮助', data: '#帮�
 
 QQBot 的 `e.reply()` 和 `e.markdown()` 会根据当前消息扫描已加载的按钮扩展。消息匹配某个扩展文件的规则后，适配器将该文件返回的按钮附加到回复底部。
 
+### 在 button 扩展文件中配置 small
+
+按钮文件可直接配置 `small: true`，无需修改发送消息的插件。支持文件级 `this.plugin.small`、单条匹配规则的 `rule.small`、返回的 `button/keyboard` 对象，以及简写按钮定义。`smallbtn` 和 `micro` 是同义字段，值必须为布尔值。
+
+```js
+export default class MyButtons {
+  constructor () {
+    this.plugin = {
+      name: '自定义小按钮',
+      priority: 100,
+      small: true, // 本文件默认使用小按钮
+      rule: [
+        { reg: '^#帮助$', fnc: 'help' },
+        { reg: '^#普通按钮$', fnc: 'help', small: false }
+      ]
+    }
+  }
+
+  help () {
+    return [{ type: 'button', data: [[
+      { label: '查询', data: '#查询' },
+      { label: '刷新', callback: '#刷新' }
+    ]] }]
+  }
+}
+```
+
+也可以只在返回值中设置，例如 `{ type: 'button', small: true, data: [[...]] }`，或使用 `Button.create(rows, { small: true })` / `Button.nav(items, { small: true })`。返回数据中的设置优先于规则，规则优先于文件，最后使用账号的全局配置；`small: false` 可覆盖全局小按钮。单个按钮标记 `small: true` 会让它所在消息的整套键盘变小，官方字体设置作用于键盘，不能只缩小某个按钮。自动附加按钮与显式 `e.markdown({ buttons })` 都支持这些设置。
+
+将文件放在 `plugins/button/example/` 或其子目录后会热更新；它属于独立按钮仓库，不要重新加入本体 Git 跟踪。
+
 按钮点击后有三种动作：
 
 | 动作 | 简写 | 点击后的行为 |

@@ -16,8 +16,9 @@ import QQBotButton from './Button.js'
 import C2CStream from './C2CStream.js'
 import QQBotIdMap from '../../model/qqbot-id-map.js'
 import { installQQBotAPIPolicy, normalizeRestrictedAPIError } from './APIPolicy.js'
-import { getMessagePolicy, getMessageVariants, withMicroKeyboard } from './MessagePolicy.js'
+import { getMessagePolicy, getMessageVariants, getSmallSetting, withMicroKeyboard } from './MessagePolicy.js'
 import { recordQQBotCount, readQQBotCount } from '../../model/qqbot-dau.js'
+import { DIRECT_UPLOAD_LIMIT, HARD_UPLOAD_LIMIT, getUploadFileType, downloadUploadFile } from './UploadPolicy.js'
 
 lain.DAU = {}
 
@@ -1040,39 +1041,32 @@ export default class adapterQQBot {
   }
 
   /** QQ 富媒体文件：上传后通过 msg_type=7 发送 file_info。 */
-  async uploadRichFile (targetType, targetId, file, name) {
-    let upload = await this.resolveUploadFile(file, name)
+  async uploadRichFile (targetType, targetId, file, name, fileType = 4, resolved) {
+    if (!['group', 'user'].includes(targetType)) throw new Error('QQBot 上传失败：未知会话类型')
+    const upload = { ...(resolved || await this.resolveUploadFile(file, name)) }
+    if (!Buffer.isBuffer(upload.buffer)) throw new Error('QQBot 上传失败：无法核实文件大小')
+    const requestedType = Number(fileType)
+    upload.file_type = getUploadFileType(requestedType, upload.buffer.length)
+    if (upload.name === 'file' && requestedType !== 4) {
+      upload.name = { 1: 'image.png', 2: 'video.mp4', 3: 'audio.silk' }[requestedType]
+    }
     const collection = `${targetType}s`
     const encodedTargetId = encodeURIComponent(targetId)
     const sendUpload = async value => await this.sdk.request.post(`/v2/${collection}/${encodedTargetId}/files`, {
-      file_type: 4,
+      file_type: value.file_type,
       // false 时只取得 file_info，随后由发送消息接口统一发送。
       srv_send_msg: false,
       file_name: value.name,
-      ...(value.buffer ? { file_data: value.buffer.toString('base64') } : { url: value.url })
+      file_data: value.buffer.toString('base64')
     })
-
-    let response
-    try {
-      // 官方群与 C2C 文件接口支持 URL 直传；本地文件和 URL 下载失败后的回退使用
-      // UploadPrepare → PUT 分片 → UploadPartFinish → /files 合并流程。
-      response = upload.buffer
-        ? await this.uploadFileInParts(targetType, targetId, upload)
-        : await sendUpload(upload)
-    } catch (error) {
-      // URL 直传在 QQ 服务端下载失败（850011）或内部代理失败（850012）时，
-      // 文件改由本机下载并执行官方分片上传。
-      if (!upload.buffer && this.isQQFileProxyError(error)) {
-        upload = await this.resolveUploadFile(file, name, true)
-        response = await this.uploadFileInParts(targetType, targetId, upload)
-      } else {
-        throw error
-      }
-    }
+    // All sources are measured, including URLs. Binary requests never exceed the 5MiB limit.
+    const response = upload.buffer.length > DIRECT_UPLOAD_LIMIT
+      ? await this.uploadFileInParts(targetType, targetId, upload)
+      : await sendUpload(upload)
 
     const { data } = response
     if (!data?.file_info) throw new Error('QQBot 文件上传失败：响应中没有 file_info')
-    return { ...data, name: upload.name, url: upload.url }
+    return { ...data, name: upload.name, url: upload.url, size: upload.buffer.length, file_type: upload.file_type, requested_file_type: requestedType }
   }
 
   /**
@@ -1084,14 +1078,14 @@ export default class adapterQQBot {
   async uploadFileInParts (targetType, targetId, upload) {
     const buffer = upload.buffer
     if (!Buffer.isBuffer(buffer)) throw new Error('QQBot 分片上传失败：缺少文件数据')
-    if (buffer.length > 200 * 1024 * 1024) throw new Error('QQBot 分片上传失败：文件超过 200MB 限制')
+    const fileType = getUploadFileType(upload.file_type ?? 4, buffer.length)
 
     const collection = `${targetType}s`
     const endpoint = `/v2/${collection}/${encodeURIComponent(targetId)}`
     const md5 = data => crypto.createHash('md5').update(data).digest('hex')
     const sha1 = data => crypto.createHash('sha1').update(data).digest('hex')
     const { data: prepared } = await this.sdk.request.post(`${endpoint}/upload_prepare`, {
-      file_type: 4,
+      file_type: fileType,
       file_size: String(buffer.length),
       file_name: upload.name,
       md5: md5(buffer),
@@ -1103,8 +1097,12 @@ export default class adapterQQBot {
     const uploadId = prepared?.upload_id
     const blockSize = Number(prepared?.block_size)
     const parts = Array.isArray(prepared?.parts) ? [...prepared.parts].sort((a, b) => Number(a.index) - Number(b.index)) : []
-    if (!uploadId || !parts.length || !Number.isFinite(blockSize) || blockSize <= 0) {
+    if (!uploadId || !parts.length || !Number.isSafeInteger(blockSize) || blockSize <= 0) {
       throw new Error('QQBot 分片上传失败：预上传响应缺少 upload_id、block_size 或 parts')
+    }
+    if (parts.some((part, index) => Number(part.index) !== index || !part.presigned_url ||
+      (part.block_size != null && (!Number.isSafeInteger(Number(part.block_size)) || Number(part.block_size) <= 0)))) {
+      throw new Error('QQBot 分片上传失败：分片序号、大小或预签名地址无效')
     }
 
     const uploadConfig = prepared.upload_config || {}
@@ -1129,7 +1127,7 @@ export default class adapterQQBot {
     if (offset !== buffer.length) throw new Error('QQBot 分片上传失败：服务端返回的分片数量与文件大小不匹配')
 
     return await this.sdk.request.post(`${endpoint}/files`, {
-      file_type: 4,
+      file_type: fileType,
       file_name: upload.name,
       srv_send_msg: false,
       upload_id: uploadId
@@ -1168,14 +1166,14 @@ export default class adapterQQBot {
     const payload = {
       content: uploaded.name || '文件',
       msg_type: 7,
-      media: { file_info: uploaded.file_info }
+      media: { file_info: uploaded.file_info },
+      msg_seq: nextQQBotMessageSeq()
     }
     const context = typeof source === 'string' ? { messageId: source } : (source || {})
     const sourceMessageId = context.messageId || context.msgId || context.id || ''
     const sourceEventId = context.eventId || ''
     if (sourceMessageId) {
       payload.msg_id = sourceMessageId
-      payload.msg_seq = nextQQBotMessageSeq()
     } else if (sourceEventId) {
       payload.event_id = sourceEventId
     }
@@ -1186,28 +1184,27 @@ export default class adapterQQBot {
     return { ...data, file_id: uploaded.file_uuid, file_info: uploaded.file_info }
   }
 
-  /** 兼容本地路径、base64、Buffer 与 URL；本地文件走官方分片上传。 */
-  async resolveUploadFile (file, name, preferFileData = false) {
+  /** All sources are read and measured before choosing binary or multipart upload. */
+  async resolveUploadFile (file, name) {
     const source = file?.url || file?.file || file
     if (!source) throw new Error('QQBot 文件上传失败：缺少 file 参数')
 
     const normalized = await Bot.FormatFile(source)
     const fileName = name || file?.name || this.getUploadFileName(source)
     const isHttpUrl = typeof normalized === 'string' && /^https?:\/\//.test(normalized)
-    if (isHttpUrl && !preferFileData) {
-      return { url: normalized, name: fileName }
+    if (isHttpUrl) {
+      const timeout = Math.max(Number(this.config?.uploadTimeout || this.config?.timeout) || 0, 60000)
+      const buffer = await downloadUploadFile(normalized, fetch, timeout)
+      return { url: normalized, name: fileName, buffer }
     }
 
     const data = await Bot.Buffer(normalized)
+    const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data)
+    if (buffer.length > HARD_UPLOAD_LIMIT) throw new Error('QQBot 上传失败：文件超过 200MiB 硬限制')
     return {
       name: fileName,
-      buffer: Buffer.isBuffer(data) ? data : Buffer.from(data)
+      buffer
     }
-  }
-
-  isQQFileProxyError (error) {
-    const code = Number(error?.response?.data?.code)
-    return [850011, 850012].includes(code) || /code\(850011|850012\)|download file error|call inner proxy error/i.test(String(error?.message || error))
   }
 
   getUploadFileName (file) {
@@ -1681,8 +1678,7 @@ export default class adapterQQBot {
   /** 转换message：QQBot 新版仅使用 markdown.content + button */
   async getQQBot(data, e) {
     data = common.array(data)
-    const small = data.some(item => ['small', 'micro'].includes(item?.type)) ||
-      e?.smallbtn === true || getMessagePolicy(this.config).small === true
+    const small = getSmallSetting(data) ?? getSmallSetting(e) ?? getMessagePolicy(this.config).small
     let reply
     const message = []
     const Pieces = []
@@ -1696,7 +1692,7 @@ export default class adapterQQBot {
         const piece = []
         piece.push({ type: 'markdown', content: content || ' ' })
         if (buttonRows.length) {
-          piece.push(...withMicroKeyboard([{ type: 'keyboard', content: { rows: buttonRows.splice(0, 5) } }], small))
+          piece.push({ ...withMicroKeyboard([{ type: 'keyboard', content: { rows: buttonRows.splice(0, 5) } }], small)[0], small })
         }
         Pieces.push(piece)
         content = ''
@@ -1961,6 +1957,16 @@ export default class adapterQQBot {
   normalizeButtons(e, input) {
     const result = []
     const pushRow = row => {
+      if (['small', 'micro'].includes(row?.type)) return
+      if (Array.isArray(row?.[0])) {
+        for (const item of row) pushRow(item)
+        return
+      }
+      if (row?.type === 'button' && Array.isArray(row.data)) {
+        const rows = Array.isArray(row.data[0]) ? row.data : [row.data]
+        for (const item of rows) pushRow(item)
+        return
+      }
       if (row?.type === 'keyboard' && row.content?.rows) {
         for (const item of row.content.rows) pushRow(item)
         return
@@ -1976,8 +1982,9 @@ export default class adapterQQBot {
 
       const items = Array.isArray(row) ? row : [row]
       const buttons = []
-      for (const btn of items) {
-        if (!btn) continue
+      for (const rawButton of items) {
+        if (!rawButton) continue
+        const { small, smallbtn, micro, ...btn } = rawButton
         if (btn.render_data && btn.action) {
           const inlineCommand = Number(btn.action.type) === 0
             ? this.parseMqqapiInlineCommand(btn.action.data)
@@ -2129,7 +2136,8 @@ export default class adapterQQBot {
       message.push({ type: 'keyboard', content: { rows: allButtonRows } })
     }
 
-    return withMicroKeyboard(message, options.micro === true || options.smallbtn === true || e?.smallbtn === true || getMessagePolicy(this.config).small === true)
+    const small = getSmallSetting(options) ?? getSmallSetting(e) ?? getMessagePolicy(this.config).small
+    return withMicroKeyboard(message, small).map(item => item.type === 'keyboard' ? { ...item, small } : item)
   }
 
   /** 解析 QQ 内联命令链接，用原生输入按钮发送命令，避免按外部应用链接打开。 */
@@ -2194,7 +2202,14 @@ export default class adapterQQBot {
         if (new RegExp(rule.reg).test(this.getButtonCommand(e))) {
           module.e = e
           const button = await module[rule.fnc](e)
-          if (button) return [...(Array.isArray(button) ? button : [button])]
+          if (button) {
+            const small = getSmallSetting(button) ?? getSmallSetting(rule) ?? getSmallSetting(module.plugin)
+            const items = Array.isArray(button) ? button : [button]
+            const segments = items.some(item => ['button', 'keyboard'].includes(item?.type))
+              ? items
+              : [{ type: 'button', data: items }]
+            return segments.map(item => ['button', 'keyboard'].includes(item?.type) && small !== undefined ? { ...item, small } : item)
+          }
         }
       }
       return false
@@ -2211,6 +2226,8 @@ export default class adapterQQBot {
     if (!sourceMessageId) throw new Error('QQBot C2C 流式消息需要入站消息 ID')
 
     let counted = false
+    const mediaState = { uploads: new Map(), resolved: new Map() }
+    const sentAttachments = new Set()
     return new C2CStream({
       msgId: sourceMessageId,
       // stream_messages 的 event_id 锚定入站消息；腾讯当前 SDK 默认同 msg_id。
@@ -2218,10 +2235,23 @@ export default class adapterQQBot {
       throttleMs,
       logger,
       send: async payload => {
-        const response = await this.sdk.request.post(`/v2/users/${encodeURIComponent(userOpenid)}/stream_messages`, payload)
+        const prepared = await this.prepareMarkdownUploads('user', userOpenid, [{ type: 'markdown', content: payload.content_raw }], mediaState)
+        for (const attachment of prepared.attachments) {
+          if (!sentAttachments.has(attachment.file_info)) {
+            await this.sendUploadedAttachment('user', userOpenid, attachment, { messageId: sourceMessageId })
+            sentAttachments.add(attachment.file_info)
+          }
+        }
+        const nextPayload = { ...payload, content_raw: prepared.message[0].content }
+        const response = await this.sdk.request.post(`/v2/users/${encodeURIComponent(userOpenid)}/stream_messages`, nextPayload)
+        if (payload.input_state === 10) {
+          mediaState.resolved.clear()
+          mediaState.uploads.clear()
+          sentAttachments.clear()
+        }
         if (!counted && response?.data?.id) {
           counted = true
-          await this.recordSuccessfulSend('user', userOpenid, [{ type: 'markdown', content: payload.content_raw }])
+          await this.recordSuccessfulSend('user', userOpenid, [{ type: 'markdown', content: nextPayload.content_raw }])
         }
         return response
       }
@@ -2337,6 +2367,13 @@ export default class adapterQQBot {
 
   /** Render a rejected message in another format without resending successful pieces. */
   async sendQQBotContent (targetType, targetId, content, context = {}) {
+    const prepared = await this.prepareMarkdownUploads(targetType, targetId, content)
+    content = prepared.message
+    context = { ...context, uploads: prepared.uploads, resolved: prepared.resolved }
+    const attachments = []
+    for (const upload of prepared.attachments) {
+      attachments.push(await this.sendUploadedAttachment(targetType, targetId, upload, context))
+    }
     const policy = getMessagePolicy(this.config)
     const variants = getMessageVariants(content, policy, targetType === 'group')
     let lastError
@@ -2367,8 +2404,9 @@ export default class adapterQQBot {
         if (!sent?.id) { failed = true; break }
       }
       if (!failed) {
-        const result = results[0]
-        return results.length > 1 ? { ...result, message_ids: results.map(item => item.id) } : result
+        const all = [...attachments, ...results]
+        const result = all[0]
+        return all.length > 1 ? { ...result, message_ids: all.map(item => item.id) } : result
       }
       // A previous piece was accepted: switching format would duplicate it.
       if (results.length) throw lastError
@@ -2381,12 +2419,15 @@ export default class adapterQQBot {
     const media = content.find(item => ['image', 'audio', 'video'].includes(item.type))
     if (media && !content.some(item => ['markdown', 'keyboard'].includes(item.type))) {
       const endpoint = `/v2/${targetType}s/${encodeURIComponent(targetId)}`
-      const { data: uploaded } = await this.sdk.request.post(`${endpoint}/files`, {
-        file_type: { image: 1, video: 2, audio: 3 }[media.type],
-        url: media.file || media.url,
-        srv_send_msg: false
-      })
-      if (!uploaded?.file_info) throw new Error('QQBot 媒体上传未返回 file_info')
+      const file = media.file || media.url
+      let uploaded = context.uploads?.get(file)
+      if (!uploaded) {
+        const resolved = context.resolved?.get(file) || await this.resolveUploadFile(file, media.name)
+        context.resolved?.set(file, resolved)
+        uploaded = await this.uploadRichFile(targetType, targetId, file, media.name, { image: 1, video: 2, audio: 3 }[media.type], resolved)
+        context.uploads?.set(file, uploaded)
+        if (resolved.buffer.length > DIRECT_UPLOAD_LIMIT) context.resolved?.delete(file)
+      }
       const text = content.map(item => item.type === 'text' ? item.text || '' : item.type === 'at' && targetType === 'group'
         ? `<@${item.user_id === 'all' ? 'everyone' : item.user_id}>` : '').join('')
       const payload = { content: text, msg_type: 7, media: { file_info: uploaded.file_info }, msg_seq: nextQQBotMessageSeq() }
@@ -2398,6 +2439,63 @@ export default class adapterQQBot {
     const send = targetType === 'group' ? this.sdk.sendGroupMessage.bind(this.sdk) : this.sdk.sendPrivateMessage.bind(this.sdk)
     const pieces = context.eventId && !context.messageId ? [{ type: 'reply', event_id: context.eventId }, ...content] : content
     return await send(encodeURIComponent(targetId), pieces, context.messageId ? { id: context.messageId } : undefined)
+  }
+
+  /** Markdown images over 5MiB also pass through official multipart upload. */
+  async prepareMarkdownUploads (targetType, targetId, message, state = {}) {
+    const uploads = state.uploads || new Map()
+    const resolved = state.resolved || new Map()
+    const attachments = []
+    const attachmentIds = new Set()
+    const result = []
+    for (const item of message) {
+      if (item.type !== 'markdown' || typeof item.content !== 'string') { result.push(item); continue }
+      const pattern = /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/g
+      let content = ''
+      let offset = 0
+      for (const match of item.content.matchAll(pattern)) {
+        const url = match[1]
+        let media = uploads.get(url)
+        let upload = media ? undefined : resolved.get(url)
+        if (!media && !upload) {
+          upload = await this.resolveUploadFile(url)
+          resolved.set(url, upload)
+        }
+        content += item.content.slice(offset, match.index)
+        if (!media && upload.buffer.length <= DIRECT_UPLOAD_LIMIT) {
+          content += match[0]
+        } else {
+          if (!media) {
+            media = await this.uploadRichFile(targetType, targetId, url, undefined, 1, upload)
+            uploads.set(url, media)
+            if (media.raw_url) uploads.set(media.raw_url, media)
+            resolved.delete(url)
+          }
+          if (media.file_type === 1 && /^https?:\/\//.test(media.raw_url || '')) {
+            content += match[0].replace(url, media.raw_url)
+          } else {
+            if (!attachmentIds.has(media.file_info)) { attachments.push(media); attachmentIds.add(media.file_info) }
+            content += '[图片已作为附件发送]'
+          }
+        }
+        offset = match.index + match[0].length
+      }
+      content += item.content.slice(offset)
+      result.push({ ...item, content })
+    }
+    return { message: result, uploads, resolved, attachments }
+  }
+
+  async sendUploadedAttachment (targetType, targetId, uploaded, context = {}) {
+    const payload = { content: uploaded.name || '附件', msg_type: 7, media: { file_info: uploaded.file_info }, msg_seq: nextQQBotMessageSeq() }
+    if (context.messageId) payload.msg_id = context.messageId
+    else if (context.eventId) payload.event_id = context.eventId
+    const { data } = await this.sdk.request.post(`/v2/${targetType}s/${encodeURIComponent(targetId)}/messages`, payload)
+    if (!data?.id) throw new Error('QQBot 附件消息发送失败：没有返回消息 ID')
+    const message = [{ type: uploaded.file_type === 1 ? 'image' : 'file', name: uploaded.name }]
+    await this.recordSuccessfulSend(targetType, targetId, message)
+    await this.cacheSentMessage(targetType === 'group' ? 'group' : 'user', targetId, data, message)
+    return data
   }
 
   async recordSuccessfulSend (targetType, targetId, content) {

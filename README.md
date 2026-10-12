@@ -63,7 +63,7 @@ git -C plugins/button status
 
 ## ws-plugin 兼容补丁
 
-仓库中的 `ws-plugin` 是指向其他仓库的 Git 记录，其工作区改动不会随 Lain-plugin 的提交传递。`patches/ws-plugin-qqbot.patch` 保存了本项目所需的兼容改动：OneBot 的普通发送接口按主动发送处理，避免误用最近消息的被动回复窗口，并补齐文件消息段。需要在独立安装的 `Miao-Yunzai/plugins/ws-plugin` 使用这些改动时，在 `Miao-Yunzai` 根目录运行：
+`ws-plugin/` 和 `22009-plugin/` 已从 Lain-plugin 的 Git 跟踪中移除，并由 `.gitignore` 忽略。已有本地目录及各自的 `.git` 保留，今后独立更新和提交；本体不保存它们的子模块指针或插件文件。`patches/ws-plugin-qqbot.patch` 仍保存本项目所需的兼容改动：OneBot 普通发送接口按主动发送处理，补齐文件消息段，并从本地绑定记录返回 QQBot 群成员列表。需要在独立安装的 `Miao-Yunzai/plugins/ws-plugin` 使用这些改动时，在 `Miao-Yunzai` 根目录运行：
 
 ```bash
 cd plugins/ws-plugin
