@@ -1,6 +1,7 @@
 import YAML from '../model/YamlHandler.js'
 import common from '../lib/common/common.js'
 import Cfg from '../lib/config/config.js'
+import QQBotIdMap from '../model/qqbot-id-map.js'
 
 export class adapter extends plugin {
   constructor () {
@@ -16,7 +17,7 @@ export class adapter extends plugin {
           permission: 'master'
         },
         {
-          reg: /^#QQ(群|Bot|频道)?设置(?!MD|markdown).+/i,
+          reg: /^#QQ(群|Bot|频道)?设置(?!MD|markdown|小按钮|micro|smallbtn).+/i,
           fnc: 'bot',
           permission: 'master'
         },
@@ -26,7 +27,7 @@ export class adapter extends plugin {
           permission: 'master'
         },
         {
-          reg: /^#QQ(群|Bot|频道)(设置)?(MD|markdown).*/i,
+          reg: /^#QQ(群|Bot|频道)(设置)?(MD|markdown|小按钮|micro|smallbtn).*/i,
           fnc: 'markdown',
           permission: 'master'
         },
@@ -161,9 +162,38 @@ export class adapter extends plugin {
     return await this.reply(`QQ群、频道账号列表：\n${list.join('\n')}\n\n共 ${list.length} 个账号`)
   }
 
-  /** 旧版模板配置已废弃 */
+  /** Per-account raw / legacy / template settings and micro keyboard switch. */
   async markdown () {
-    return await this.reply('旧版 Markdown 模板配置已废弃。新版 QQBot Markdown 直接通过 content 发送，无需配置模板ID或模式。', true, { at: true })
+    const text = String(this.e.msg || '').replace(/^#QQ(群|Bot|频道)(设置)?(MD|markdown|小按钮|micro|smallbtn)/i, '').replace(/：/g, ':').trim()
+    const values = text.split(':')
+    const current = this.getQQBotConfigSelfId(this.e)
+    const id = values.length > 1 && /^\d+$/.test(values[0]) ? values.shift() : current
+    const cfg = new YAML(lain._pathCfg + '/token.yaml')
+    const accounts = cfg.get('token') || {}
+    const accountId = accounts[id] ? id : Object.keys(accounts).find(key => String(QQBotIdMap.getBoundBotQQ(key)) === id)
+    if (!accountId) return await this.reply('未找到机器人账号，请指定 AppID 或已绑定的机器人 QQ 号。')
+    const account = accounts[accountId]
+    if (/小按钮|micro|smallbtn/i.test(this.e.msg)) {
+      if (!/^(true|false|开启|关闭)$/i.test(values[0] || '')) return await this.reply('格式：#QQBot小按钮 AppID:true 或 AppID:false')
+      account.smallbtn = /^(true|开启)$/i.test(values[0])
+    } else {
+      const selected = values[0]
+      if (/^(raw|legacy)$/i.test(selected || '')) {
+        const old = typeof account.markdown === 'object' ? account.markdown : {}
+        account.markdown = { ...old, mode: selected.toLowerCase() }
+      } else {
+        const templateId = selected?.toLowerCase() === 'template' ? values[1] : selected
+        const keys = ((selected?.toLowerCase() === 'template' ? values[2] : values[1]) || '').split(/[,，]/).map(key => key.trim()).filter(Boolean)
+        if (!templateId || !keys.length) return await this.reply('格式：#QQBotMD AppID:raw / AppID:legacy / AppID:模板ID:参数名1,参数名2')
+        account.markdown = { mode: 'template', templateId, params: keys }
+      }
+    }
+    cfg.set('token', accounts)
+    for (const botId of [accountId, `qg_${accountId}`]) {
+      if (Bot?.[botId]?.config) Object.assign(Bot[botId].config, { markdown: account.markdown, smallbtn: account.smallbtn })
+    }
+    const policy = typeof account.markdown === 'object' ? account.markdown : { mode: account.markdown || 'raw' }
+    return await this.reply(`QQBot ${accountId}：模式 ${policy.mode}，小按钮 ${account.smallbtn ? '开启' : '关闭'}，配置已生效。`)
   }
 
   /** 旧版模板模式已废弃 */

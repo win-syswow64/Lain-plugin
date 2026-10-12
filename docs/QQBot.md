@@ -77,7 +77,30 @@ token:
 
 ## 消息、Markdown 与媒体
 
-QQBot v2 的文本通过 Markdown 内容发送。适配器支持 `e.reply()`、`e.markdown()` 和 `e.replyMarkdown()`；Markdown 无需配置旧版模板 ID。旧的 `#QQBot设置MD` 配置入口已经废弃。
+QQBot 每个 AppID 可以单独选择消息格式。默认 `raw` 使用原生 Markdown；`legacy` 使用普通文本/媒体，按钮转为可复制的文字指令提示；模板模式使用已申请的模板 ID。`e.reply()`、`e.markdown()`、主动群/私聊发送以及回调回复共用同一发送策略。
+
+由主人发送以下命令，配置立即生效并保存在 `config/config/token.yaml`。机器人标识可以填写 AppID 或通过 `#绑定机器人qq` 保存的机器人 QQ 号；在 QQBot 会话中可省略标识：
+
+```text
+#QQBotMD AppID:raw
+#QQBotMD AppID:legacy
+#QQBotMD AppID:模板ID:标题参数名,正文参数名
+#QQBotMD AppID:template:模板ID:标题参数名,正文参数名
+#QQBot小按钮 AppID:true
+#QQBotmicro AppID:false
+```
+
+也可为对应账号填写 YAML：
+
+```yaml
+markdown:
+  mode: raw              # raw / legacy / template
+  templateId: "模板ID"   # template 模式必需；raw 失败时也可降级到此模板
+  params: [title, text]   # 参数名，不是参数正文
+smallbtn: false
+```
+
+模板参数按正文各行顺序填写，最后一个参数接收剩余正文，空参数使用空格填充。选择 raw 或 template 后，首选格式失败会重试一次，然后尝试已配置的另一种 Markdown 格式，最后降级普通文本/媒体；legacy 只重试普通格式。已发送成功的片段不会重复发送，超时等无法确定服务端是否已接收的错误不自动重发。只对成功发送的官方消息计数。模板和原生按钮仍需要账号对应权限。
 
 ```js
 await e.markdown('# 查询结果\n已完成。')
@@ -328,6 +351,32 @@ await bot.deleteJoinApprovalStrategy(strategy.strategy_id)
 官方文档显示，群成员列表与成员详情接口目前处于“内邀接入中”，不能作为禁言的前置校验；适配器只使用 `/bot_state` 检查机器人自身的群角色，然后直接调用设置成员禁言接口，由 QQ 官方完成目标成员权限校验。`/bot_state` 仍属于白名单能力，未获权限时会报告接口错误；可查看[启动接入](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/getting-started.html)、[机器人群内状态](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_bot_state.get.html)、[群成员详情](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_members_member_openid.get.html)、[设置成员禁言](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_restrict_chat_setting.post.html)及[群消息发送](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html)。
 
 QQBot 的 `pickGroup()` 在原生事件和 ICQQ 兼容事件中都提供异步 `is_admin()`、`is_owner()` 方法，依据 `/bot_state.member_role` 判断机器人权限；接口未授权或查询失败时方法会抛出错误，调用方应使用 `try/catch` 处理。
+
+## DAU 与 yenai-plugin 统计
+
+- `#QQBotDAU`：查询当前群的接收消息、成功发送消息和成功发送图片数量。
+- `#QQBotDAUPro`：主人查询所有 QQBot 账号的总计、各群窗口及每日统计记录；可追加 AppID 或已绑定机器人 QQ 号限定账号。
+- 群统计从首次计数起保留 24 小时；账号总计从首次计数起保留 30 天，每日记录各保留 30 天。窗口内递增不延长过期时间，Redis 自动删除，到下一条消息再创建新窗口。采用固定保留窗口，不是永久累加，也不是精确滚动的“过去 24 小时”。
+- 接收的是官方真实消息，按钮回调不计作用户发消息；重试失败、媒体上传、输入状态通知不增加发送消息量，流式回复只计一条。Markdown 中的图片也进入图片计数。
+- 开关仍为 `config/config/Config-other.yaml` 中的 `QQBotdau: true`。新统计不再写无限保留的月度 JSON 文件，旧文件不参与查询。
+
+Redis 中的统计记录使用 `lain:qqbot:dau:v2:<AppID>:total`、`:group:<群OpenID>` 和 `:day:<日期>`。同时维护 yenai-plugin 查询的字符串键，镜像账号当前总计，并按总计窗口剩余时间自动过期：
+
+```text
+Yz:count:send:msg:bot:<机器人ID>:total
+Yz:count:receive:msg:bot:<机器人ID>:total
+Yz:count:send:image:bot:<机器人ID>:total
+```
+
+机器人 ID 包含 AppID 和已绑定的数字机器人 QQ 号，保证原生 QQBot 与 ICQQ 转译后的 `bot.uin` 都能查询。计数通过 Redis Lua 原子递增，并发消息不会因读写覆盖丢失。
+
+## ws-plugin 群成员列表
+
+`get_group_member_list` 对 QQBot 只读取目标群已绑定 QQ 的成员，每名成员返回一个对象；其他群成员、没有 QQ 绑定的用户不会进入结果，没有匹配成员时 `data: []`。无需启用成员列表转译开关，也不调用官方成员列表 API。
+
+响应由 ws-plugin 包装为 `{ status: 'ok', retcode: 0, data: [...] }`，保留请求的 echo。字段遵循 OneBot 类型：`group_id/user_id` 为数字，昵称/群名片/角色使用已缓存的资料，其他不支持的字符串使用一个空格、普通数值为 0、布尔值为 false；`join_time/last_sent_time/title_expire_time` 缺失时使用当前 Unix 秒时间戳。
+
+对应兼容补丁在 `patches/ws-plugin-qqbot.patch`，包含 `model/api.js`、`model/makeMsg.js` 和新增的 `model/groupMembers.js`。ws-plugin 是独立 Git 仓库，应将补丁应用到实际安装目录，不能只更新 Lain-plugin 后期待 ws-plugin 文件自动更新。
 
 ## 相关文档
 

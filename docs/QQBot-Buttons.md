@@ -4,6 +4,13 @@ Lain-plugin 为 QQBot 提供原生 `keyboard` 按钮消息。按钮可以发送�
 
 ## 使用现成按钮
 
+小按钮（micro）沿用 Yunzai-QQBot-Plugin 的格式：发送 `#QQBot小按钮 AppID:true` 为该账号全局开启，或为单条消息附加 `segment.custom('small')`，也支持 `{ type: 'micro' }`。两者设置 `keyboard.content.style.font_size = "small"`，不改变输入、回调或链接动作及按钮权限。`e.markdown()` 可传 `{ smallbtn: true }` 或 `{ micro: true }`。legacy 普通消息模式不发送原生键盘，按钮以文字指令提示显示。
+
+```js
+await e.reply(['请选择操作', Button.create([[{ text: '帮助', data: '#帮助' }]]), segment.custom('small')])
+await e.markdown('请选择操作', { buttons: [[{ label: '帮助', data: '#帮助' }]], micro: true })
+```
+
 QQBot 的 `e.reply()` 和 `e.markdown()` 会根据当前消息扫描已加载的按钮扩展。消息匹配某个扩展文件的规则后，适配器将该文件返回的按钮附加到回复底部。
 
 按钮点击后有三种动作：

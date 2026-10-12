@@ -3,6 +3,7 @@ import loader from '../../../../lib/plugins/loader.js'
 import common from '../../lib/common/common.js'
 import Cfg from '../../lib/config/config.js'
 import { faceMap } from '../../model/shamrock/face.js'
+import { getMessagePolicy, getMessageVariants } from './MessagePolicy.js'
 
 export default class adapterQQGuild {
   /** 传入基本配置 */
@@ -336,19 +337,19 @@ export default class adapterQQGuild {
 
   /** 处理回复消息 */
   async sendReplyMsg(data, msg, quote) {
-    let { Pieces, messageLog } = await this.getQQGuild(msg)
+    let { Pieces, messageLog } = await this.getQQGuild(msg, data)
     const info = data.message_type === 'group' ? '频道' : '私信'
     lain.info(this.id, `<回复${info}:${data.group_name}(${data.group_id})> => ${messageLog}`)
     let result
     for (const item of Pieces) {
       try {
         lain.debug(`发送回复${info}消息：`, JSON.stringify(item))
-        let res = await data.data.reply(item, quote)
+        let res = await this.sendWithMessagePolicy(item, content => data.data.reply(content, quote), common.array(msg).some(p => ['small', 'micro'].includes(p.type)))
         res.message_id = res.id
         result ||= res
         lain.debug(`回复${info}消息返回：`, res)
       } catch (error) {
-        console.error(error)
+        throw error
       }
     }
     return result
@@ -361,7 +362,7 @@ export default class adapterQQGuild {
     if (options.button) message.push(...this.normalizeButtons(data, options.button))
     else if (options.buttons) message.push(...this.normalizeButtons(data, options.buttons))
     try {
-      const res = await data.data.reply(message, options.quote)
+      const res = await this.sendWithMessagePolicy(message, content => data.data.reply(content, options.quote), options.smallbtn || options.micro)
       res.message_id = res.id
       return res
     } catch (error) {
@@ -372,6 +373,37 @@ export default class adapterQQGuild {
 
   async makeMarkdownSegment(e, data, options = {}) {
     return { type: 'markdown', content: await this.makeMarkdownContent(e, data, options) }
+  }
+
+  async sendWithMessagePolicy (message, send, small = false) {
+    const rows = []
+    const normalized = common.array(message).filter(item => !['small', 'micro'].includes(item.type)).flatMap(item => {
+      if (item.type === 'button') { rows.push({buttons:item.buttons || []}); return [] }
+      return [item]
+    })
+    if (rows.length) normalized.push({type:'keyboard',content:{rows:rows.slice(0,5)}})
+    const text = normalized.filter(item => ['text', 'at'].includes(item.type)).map(item => item.type === 'text'
+      ? item.text || ''
+      : item.user_id === 'all' ? '<qqbot-at-everyone />' : `<qqbot-at-user id="${item.user_id || ''}" />`).join('')
+    const raw = !normalized.some(item => item.type === 'markdown') && text
+      ? [{type:'markdown',content:text},...normalized.filter(item => !['text','at'].includes(item.type))]
+      : normalized
+    const policy = getMessagePolicy(this.config)
+    if (small) policy.small = true
+    let lastError
+    for (const variant of getMessageVariants(raw, policy, true)) {
+      for (let attempt = 0; attempt < variant.attempts; attempt++) {
+        try {
+          const result = await send(variant.message)
+          if (!result?.id) throw new Error('频道发送失败：没有返回消息 ID')
+          return result
+        } catch (error) {
+          lastError = error
+          if (!error.response && /timeout|timed out|ECONNRESET|ETIMEDOUT/i.test(error.message || '')) throw error
+        }
+      }
+    }
+    throw lastError
   }
 
   async makeMarkdownContent(e, data, options = {}) {
@@ -476,7 +508,7 @@ export default class adapterQQGuild {
   }
 
   /** 转换message为sdk可接收的格式 */
-  async getQQGuild(data) {
+  async getQQGuild(data, e = {}) {
     data = common.array(data)
     let reply
     const text = []
@@ -487,6 +519,9 @@ export default class adapterQQGuild {
 
     for (let i of data) {
       switch (i.type) {
+        case 'small':
+        case 'micro':
+          break
         case 'text':
         case 'forward':
           if (String(i.text).trim()) {
@@ -497,7 +532,7 @@ export default class adapterQQGuild {
           }
           break
         case 'at':
-          i.user_id = (i.qq || i.id).replace('qg_', '')
+          i.user_id = String(i.user_id || i.qq || i.id || '').replace(/^qg_/, '')
           message.push(i)
           messageLog.push(`<@:${i.qq || i.id}>`)
           break
@@ -673,11 +708,11 @@ export default class adapterQQGuild {
     for (let item of Pieces) {
       try {
         if (reply) item = Array.isArray(item) ? [reply, ...item] : [reply, item]
-        let res = await this.sdk.sendDirectMessage(directData.guild_id, item)
+        let res = await this.sendWithMessagePolicy(item, content => this.sdk.sendDirectMessage(directData.guild_id, content), common.array(data).some(p => ['small', 'micro'].includes(p.type)))
         res.message_id = res.id
         return res
       } catch (error) {
-        logger.error('发送主动私信消息息失败：', error)
+        throw error
       }
     }
   }
@@ -690,11 +725,11 @@ export default class adapterQQGuild {
     for (let item of Pieces) {
       try {
         if (reply) item = Array.isArray(item) ? [reply, ...item] : [reply, item]
-        let res = await this.sdk.sendGuildMessage(channel_id, item)
+        let res = await this.sendWithMessagePolicy(item, content => this.sdk.sendGuildMessage(channel_id, content), common.array(data).some(p => ['small', 'micro'].includes(p.type)))
         res.message_id = res.id
         return res
       } catch (error) {
-        logger.error('发送频道主动消息失败：', error)
+        throw error
       }
     }
   }

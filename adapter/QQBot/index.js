@@ -4,7 +4,6 @@ import fs from 'fs'
 import lodash from 'lodash'
 import fetch from 'node-fetch'
 import path from 'path'
-import moment from 'moment'
 import wasm from 'silk-wasm';
 const { encode, isSilk } = wasm;
 import Yaml from 'yaml'
@@ -17,6 +16,8 @@ import QQBotButton from './Button.js'
 import C2CStream from './C2CStream.js'
 import QQBotIdMap from '../../model/qqbot-id-map.js'
 import { installQQBotAPIPolicy, normalizeRestrictedAPIError } from './APIPolicy.js'
+import { getMessagePolicy, getMessageVariants, withMicroKeyboard } from './MessagePolicy.js'
+import { recordQQBotCount, readQQBotCount } from '../../model/qqbot-dau.js'
 
 lain.DAU = {}
 
@@ -379,6 +380,9 @@ export default class adapterQQBot {
       makeForwardMsg: async (data) => await common.makeForwardMsg(data),
       getMsg: async (msg_id) => await this.getCachedMessage('group', groupID, msg_id),
       getChatHistory: async (msg_id, num = 1) => await this.getCachedChatHistory('group', groupID, msg_id, num),
+      // Return only locally bound QQ users; never query the restricted official member API.
+      getMemberMap: async () => this.getBoundGroupMemberMap(groupID),
+      getMemberList: async () => Array.from(this.getBoundGroupMemberMap(groupID).values()),
       /** OneBot upload_group_file 兼容；QQ群 Bot 不支持目录，folder 参数会被忽略。 */
       fs: {
         upload: async (file, folder = '/', name) => await this.sendGroupFile(groupID, file, name)
@@ -398,7 +402,6 @@ export default class adapterQQBot {
       approveJoinRequest: async (memberId, approve = true, options) => await this.approveGroupJoinRequest(groupID, memberId, approve, options),
       /** 全体禁言 */
       muteAll: async (type) => Promise.reject(new Error('QQBot未支持')),
-      getMemberMap: async () => Promise.reject(new Error('QQBot未支持')),
       /** 退群 */
       quit: async () => Promise.reject(new Error('QQBot未支持')),
       /** 设置管理 */
@@ -443,6 +446,16 @@ export default class adapterQQBot {
       member: this.member(groupID, userID),
       getAvatarUrl: (size = 0) => this.getAvatarUrl(size, userID)
     }
+  }
+
+  getBoundGroupMemberMap (groupID) {
+    const numeric = QQBotIdMap.normalizeQQ(groupID)
+    return QQBotIdMap.getCachedGroupMemberMap({
+      self_id: this.id,
+      group_openid: numeric ? '' : this.stripQQBotId(groupID),
+      group_qq: numeric || '',
+      qq_self_id: QQBotIdMap.getBoundBotQQ(this.id)
+    })
   }
 
   member(groupId, userId) {
@@ -1168,6 +1181,7 @@ export default class adapterQQBot {
     }
     const { data } = await this.sdk.request.post(`/v2/${targetType}s/${encodeURIComponent(targetId)}/messages`, payload)
     if (!data?.id) throw new Error('QQBot 文件消息发送失败：响应中没有消息 ID')
+    await this.recordSuccessfulSend(targetType, targetId, [])
     await this.cacheSentMessage(targetType === 'group' ? 'group' : 'user', targetId, data, [{ type: 'file', name: uploaded.name }])
     return { ...data, file_id: uploaded.file_uuid, file_info: uploaded.file_info }
   }
@@ -1386,7 +1400,7 @@ export default class adapterQQBot {
     lain.info(this.id, `<群:${e.group_id}><用户:${e.user_id}> -> ${this.messageLog(e.message)}`)
     QQBotIdMap.logDebug(this.id, 'QQBot转换后data', e)
     /** dau统计 */
-    this.msg_count(data)
+    await this.msg_count(data)
     return e
   }
 
@@ -1667,6 +1681,8 @@ export default class adapterQQBot {
   /** 转换message：QQBot 新版仅使用 markdown.content + button */
   async getQQBot(data, e) {
     data = common.array(data)
+    const small = data.some(item => ['small', 'micro'].includes(item?.type)) ||
+      e?.smallbtn === true || getMessagePolicy(this.config).small === true
     let reply
     const message = []
     const Pieces = []
@@ -1680,7 +1696,7 @@ export default class adapterQQBot {
         const piece = []
         piece.push({ type: 'markdown', content: content || ' ' })
         if (buttonRows.length) {
-          piece.push({ type: 'keyboard', content: { rows: buttonRows.splice(0, 5) } })
+          piece.push(...withMicroKeyboard([{ type: 'keyboard', content: { rows: buttonRows.splice(0, 5) } }], small))
         }
         Pieces.push(piece)
         content = ''
@@ -1696,6 +1712,9 @@ export default class adapterQQBot {
     for (let i of data) {
       if (typeof i !== 'object' || i === null) i = { type: 'text', text: String(i) }
       switch (i.type) {
+        case 'small':
+        case 'micro':
+          break
         case 'text':
         case 'forward': {
           if (!String(i.text || '').trim()) break
@@ -2110,7 +2129,7 @@ export default class adapterQQBot {
       message.push({ type: 'keyboard', content: { rows: allButtonRows } })
     }
 
-    return message
+    return withMicroKeyboard(message, options.micro === true || options.smallbtn === true || e?.smallbtn === true || getMessagePolicy(this.config).small === true)
   }
 
   /** 解析 QQ 内联命令链接，用原生输入按钮发送命令，避免按外部应用链接打开。 */
@@ -2191,16 +2210,21 @@ export default class adapterQQBot {
     const sourceMessageId = String(messageId || msgId || '').trim()
     if (!sourceMessageId) throw new Error('QQBot C2C 流式消息需要入站消息 ID')
 
+    let counted = false
     return new C2CStream({
       msgId: sourceMessageId,
       // stream_messages 的 event_id 锚定入站消息；腾讯当前 SDK 默认同 msg_id。
       eventId: sourceMessageId,
       throttleMs,
       logger,
-      send: payload => this.sdk.request.post(
-        `/v2/users/${encodeURIComponent(userOpenid)}/stream_messages`,
-        payload
-      )
+      send: async payload => {
+        const response = await this.sdk.request.post(`/v2/users/${encodeURIComponent(userOpenid)}/stream_messages`, payload)
+        if (!counted && response?.data?.id) {
+          counted = true
+          await this.recordSuccessfulSend('user', userOpenid, [{ type: 'markdown', content: payload.content_raw }])
+        }
+        return response
+      }
     })
   }
 
@@ -2247,7 +2271,6 @@ export default class adapterQQBot {
       // OneBot 一条消息可能被拆分为多个官方消息；返回第一个消息 ID。
       result ||= res
       logger.debug('发送主动好友消息：', JSON.stringify(i))
-      this.send_count()
     }
     if (!result) throw new Error('QQBot 未返回私聊消息 ID')
     return this.returnResult(result)
@@ -2285,7 +2308,6 @@ export default class adapterQQBot {
       const res = await this.sendQQBotPiece('group', groupID, i, source)
       // OneBot 一条消息可能被拆分为多个官方消息；返回第一个消息 ID。
       result ||= res
-      this.send_count()
       logger.debug('发送主动群消息：', JSON.stringify(i))
     }
     if (!result) throw new Error('QQBot 未返回群消息 ID')
@@ -2313,6 +2335,77 @@ export default class adapterQQBot {
     return String(content ?? '').replace(/<qqbot-at-(?:user|everyone)\b[^>]*\/>/gi, '')
   }
 
+  /** Render a rejected message in another format without resending successful pieces. */
+  async sendQQBotContent (targetType, targetId, content, context = {}) {
+    const policy = getMessagePolicy(this.config)
+    const variants = getMessageVariants(content, policy, targetType === 'group')
+    let lastError
+    for (const variant of variants) {
+      // Plain/media messages may contain several images. Each official message carries one file.
+      const media = variant.message.filter(item => ['image', 'video', 'audio'].includes(item.type))
+      const pieces = media.length > 1 && !variant.message.some(item => ['markdown', 'keyboard'].includes(item.type))
+        ? media.map((item, index) => index ? [item] : [...variant.message.filter(p => !media.includes(p)), item])
+        : [variant.message]
+      const results = []
+      let failed = false
+      for (const piece of pieces) {
+        let sent
+        for (let attempt = 0; attempt < variant.attempts; attempt++) {
+          try {
+            sent = await this.sendQQBotContentOnce(targetType, targetId, piece, context)
+            if (!sent?.id) throw new Error('QQBot 发送失败：响应中没有消息 ID')
+            await this.recordSuccessfulSend(targetType, targetId, piece)
+            await this.cacheSentMessage(targetType === 'group' ? 'group' : 'user', targetId, sent, piece)
+            results.push(sent)
+            break
+          } catch (error) {
+            lastError = error
+            // Do not retry a timeout: the platform may already have accepted the message.
+            if (!error.response && /timeout|timed out|ECONNRESET|ETIMEDOUT/i.test(error.message || '')) throw error
+          }
+        }
+        if (!sent?.id) { failed = true; break }
+      }
+      if (!failed) {
+        const result = results[0]
+        return results.length > 1 ? { ...result, message_ids: results.map(item => item.id) } : result
+      }
+      // A previous piece was accepted: switching format would duplicate it.
+      if (results.length) throw lastError
+      logger.debug(`[QQBot] ${this.id} ${variant.mode} 发送失败，尝试降级：${lastError?.code || ''}`)
+    }
+    throw lastError || new Error('QQBot 消息发送失败')
+  }
+
+  async sendQQBotContentOnce (targetType, targetId, content, context) {
+    const media = content.find(item => ['image', 'audio', 'video'].includes(item.type))
+    if (media && !content.some(item => ['markdown', 'keyboard'].includes(item.type))) {
+      const endpoint = `/v2/${targetType}s/${encodeURIComponent(targetId)}`
+      const { data: uploaded } = await this.sdk.request.post(`${endpoint}/files`, {
+        file_type: { image: 1, video: 2, audio: 3 }[media.type],
+        url: media.file || media.url,
+        srv_send_msg: false
+      })
+      if (!uploaded?.file_info) throw new Error('QQBot 媒体上传未返回 file_info')
+      const text = content.map(item => item.type === 'text' ? item.text || '' : item.type === 'at' && targetType === 'group'
+        ? `<@${item.user_id === 'all' ? 'everyone' : item.user_id}>` : '').join('')
+      const payload = { content: text, msg_type: 7, media: { file_info: uploaded.file_info }, msg_seq: nextQQBotMessageSeq() }
+      if (context.messageId) payload.msg_id = context.messageId
+      else if (context.eventId) payload.event_id = context.eventId
+      const { data } = await this.sdk.request.post(`${endpoint}/messages`, payload)
+      return data
+    }
+    const send = targetType === 'group' ? this.sdk.sendGroupMessage.bind(this.sdk) : this.sdk.sendPrivateMessage.bind(this.sdk)
+    const pieces = context.eventId && !context.messageId ? [{ type: 'reply', event_id: context.eventId }, ...content] : content
+    return await send(encodeURIComponent(targetId), pieces, context.messageId ? { id: context.messageId } : undefined)
+  }
+
+  async recordSuccessfulSend (targetType, targetId, content) {
+    const images = content.reduce((total, item) => total + (item.type === 'image' ? 1 :
+      item.type === 'markdown' ? (String(item.content || item.params?.flatMap(p => p.values || []).join('\n') || '').match(/!\[[^\]]*\]\(/g) || []).length : 0), 0)
+    await this.send_count(targetType === 'group' ? targetId : '', images)
+  }
+
   /** 一条云崽消息可包含普通内容和文件；文件通过富媒体接口单独发送。 */
   async sendQQBotPiece (targetType, targetId, message, source = {}) {
     const parts = common.array(message)
@@ -2337,16 +2430,7 @@ export default class adapterQQBot {
     }
     // 文件消息的 reply 段已被转换为 msg_id；避免再单独发送一个空引用消息。
     if (normalContent.length) {
-      const send = targetType === 'group' ? this.sdk.sendGroupMessage.bind(this.sdk) : this.sdk.sendPrivateMessage.bind(this.sdk)
-      const useEventReply = !!sourceEventId && !sourceMessageId
-      const sendable = useEventReply
-        ? [{ type: 'reply', event_id: sourceEventId }, ...normalContent]
-        : normalContent
-      // 只传 SDK source.id，让 SDK 设置官方 msg_id/msg_seq；不传 reply 段，
-      // 避免其额外写入 C2C 暂不支持的 message_reference 字段。
-      const sdkSource = !useEventReply && sourceMessageId ? { id: sourceMessageId } : undefined
-      const sent = await send(encodeURIComponent(targetId), sendable, sdkSource)
-      await this.cacheSentMessage(targetType === 'group' ? 'group' : 'user', targetId, sent, normalContent)
+      const sent = await this.sendQQBotContent(targetType, targetId, normalContent, sendSource)
       result ||= sent
     }
     if (!result) throw new Error('QQBot 消息内容为空')
@@ -2357,25 +2441,14 @@ export default class adapterQQBot {
   async sendReplyMsg(e, msg) {
     if (typeof msg === 'string' && msg.includes('歌曲分享失败：')) return false
     let res
-    const { Pieces, normalMsg } = await this.getQQBot(msg, e)
-    common.log('Lain-plugin', `Pieces: ${JSON.stringify(Pieces)}, normalMsg: ${JSON.stringify(normalMsg)}`)
+    const { Pieces } = await this.getQQBot(msg, e)
 
     for (const i in Pieces) {
       if (!Pieces[i] || Object.keys(Pieces[i]).length === 0) continue
       let { ok, data } = await this.sendMsg(e, Pieces[i])
       if (ok) { res = data; continue }
 
-      /** 错误文本处理 */
-      data = data.match(/code\(\d+\): .*/)?.[0] || data
-
-      /** 新版Markdown失败时降级为普通消息 */
-      if (normalMsg.length) {
-        let val
-        for (const p of normalMsg) try { val = await this.sendMsg(e, p) } catch { }
-        if (val?.ok) return this.returnResult(val.data)
-      }
-      const val = await this.sendMsg(e, data)
-      return this.returnResult(val.data)
+      throw new Error(data)
     }
 
     return this.returnResult(res)
@@ -2384,7 +2457,6 @@ export default class adapterQQBot {
   /** 发送消息 */
   async sendMsg(e, msg) {
     try {
-      this.send_count()
       logger.debug('发送回复消息：', JSON.stringify(msg))
       const replyId = e.qqbot_message_id || e.message_id || e.data?.id
       const source = { messageId: replyId }
@@ -2440,83 +2512,31 @@ export default class adapterQQBot {
     return `${year}-${month}-${day}`
   }
 
-  /** 初始化 */
-  async getDAU() {
-    const time = this.getNowDate()
-    const msg_count = (await redis.get(`QQBotDAU:msg_count:${this.id}`)) || 0
-    const send_count = (await redis.get(`QQBotDAU:send_count:${this.id}`)) || 0
-    let data = await redis.get(`QQBotDAU:${this.id}`)
-    if (data) {
-      data = JSON.parse(data)
-      data.msg_count = Number(msg_count)
-      data.send_count = Number(send_count)
-      data.time = time
-      return data
-    } else {
-      return {
-        user_count: 0, // 上行消息人数
-        group_count: 0, // 上行消息群数
-        msg_count, // 上行消息量
-        send_count, // 下行消息量
-        user_cache: {},
-        group_cache: {},
-        time
+  /** Redis retains group windows for 24h and bot totals/daily records for 30 days. */
+  async getDAU () {
+    return await readQQBotCount(this.id)
+  }
+
+  async recordCount (direction, groupId = '', images = 0) {
+    if (!Cfg.Other.QQBotdau) return
+    try {
+      const group = groupId ? await this.getMessageCacheTarget('group', groupId) : ''
+      const alias = QQBotIdMap.getBoundBotQQ(this.id)
+      const counts = await recordQQBotCount({ botId: this.id, aliases: alias ? [alias] : [], groupId: group, direction, images })
+      if (Bot[this.id]?.stat) {
+        Object.assign(Bot[this.id].stat, { recv_msg_cnt: counts.received, send_msg_cnt: counts.sent, send_img_cnt: counts.images })
       }
+    } catch (error) {
+      logger.warn(`[QQBot DAU] ${this.id} 统计写入失败：${error.message}`)
     }
   }
 
-  /** dau统计 */
-  async dau() {
-    try {
-      if (!Cfg.Other.QQBotdau) return
-      if (!lain.DAU[this.id]) lain.DAU[this.id] = await this.getDAU()
-      lain.DAU[this.id].send_count++
-      const time = moment(Date.now()).add(1, 'days').format('YYYY-MM-DD 00:00:00')
-      const EX = Math.round((new Date(time).getTime() - new Date().getTime()) / 1000)
-      redis.set(`QQBotDAU:send_count:${this.id}`, lain.DAU[this.id].send_count * 1, { EX })
-    } catch (error) {
-      logger.error(error)
-    }
+  async send_count (groupId = '', images = 0) {
+    await this.recordCount('sent', groupId, images)
   }
 
-  /** 下行消息量 */
-  async send_count() {
-    try {
-      if (!Cfg.Other.QQBotdau) return
-      if (!lain.DAU[this.id]) lain.DAU[this.id] = await this.getDAU()
-      lain.DAU[this.id].send_count++
-      const time = moment(Date.now()).add(1, 'days').format('YYYY-MM-DD 00:00:00')
-      const EX = Math.round((new Date(time).getTime() - new Date().getTime()) / 1000)
-      redis.set(`QQBotDAU:send_count:${this.id}`, lain.DAU[this.id].send_count * 1, { EX })
-    } catch (error) {
-      logger.error(error)
-    }
-  }
-
-  /** 上行消息量 */
-  async msg_count(data) {
-    try {
-      if (!Cfg.Other.QQBotdau) return
-      let needSetRedis = false
-      if (!lain.DAU[this.id]) lain.DAU[this.id] = await this.getDAU()
-      lain.DAU[this.id].msg_count++
-      if (data.group_id && !lain.DAU[this.id].group_cache[data.group_id]) {
-        lain.DAU[this.id].group_cache[data.group_id] = 1
-        lain.DAU[this.id].group_count++
-        needSetRedis = true
-      }
-      if (data.user_id && !lain.DAU[this.id].user_cache[data.user_id]) {
-        lain.DAU[this.id].user_cache[data.user_id] = 1
-        lain.DAU[this.id].user_count++
-        needSetRedis = true
-      }
-      const time = moment(Date.now()).add(1, 'days').format('YYYY-MM-DD 00:00:00')
-      const EX = Math.round((new Date(time).getTime() - new Date().getTime()) / 1000)
-      if (needSetRedis) redis.set(`QQBotDAU:${this.id}`, JSON.stringify(lain.DAU[this.id]), { EX })
-      redis.set(`QQBotDAU:msg_count:${this.id}`, lain.DAU[this.id].msg_count * 1, { EX })
-    } catch (error) {
-      logger.error(error)
-    }
+  async msg_count (data) {
+    await this.recordCount('received', data.group_openid || data.group_id || '')
   }
 
   // ========== 交互事件处理 ==========

@@ -1,8 +1,20 @@
 diff --git a/model/api.js b/model/api.js
-index 3879f57..bf467bb 100644
+index 3879f57..f717ae1 100644
 --- a/model/api.js
 +++ b/model/api.js
-@@ -126,13 +126,8 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+@@ -7,9 +7,11 @@ import common from '../../../lib/common/common.js'
+ import { Version } from '../components/index.js'
+ import { makeSendMsg, makeForwardMsg, msgToOneBotMsg } from './makeMsg.js'
+ import { getMsg, setMsg, getLatestMsg, getUser_id, getGroup_id } from './DataBase.js'
++import { getQQBotBoundMembers, normalizeGroupMember } from './groupMembers.js'
+
+ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+   const bot = Bot[uin] || Bot
++  const requestedGroupId = params.group_id
+   let sendRet = null
+   let ResponseData = null
+   if (adapter) {
+@@ -126,13 +128,8 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
      send_private_msg: async (params) => {
        let { sendMsg, quote } = await makeSendMsg(params, uin, adapter)
        if (sendMsg.length == 0) return
@@ -18,7 +30,7 @@ index 3879f57..bf467bb 100644
        sendRet = await bot.pickFriend?.(params.user_id).sendMsg?.(sendMsg, quote)
        logger.info(`[ws-plugin] 连接名字:${name} 处理完成`)
      },
-@@ -140,13 +135,7 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+@@ -140,13 +137,7 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
      send_group_msg: async (params) => {
        let { sendMsg, quote } = await makeSendMsg(params, uin, adapter)
        if (sendMsg.length == 0) return
@@ -33,7 +45,7 @@ index 3879f57..bf467bb 100644
        sendRet = await bot.pickGroup?.(params.group_id).sendMsg?.(sendMsg, quote)
        logger.info(`[ws-plugin] 连接名字:${name} 处理完成`)
      },
-@@ -155,22 +144,8 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+@@ -155,22 +146,8 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
        let { sendMsg, quote } = await makeSendMsg(params, uin, adapter)
        if (sendMsg.length == 0) return
        if (params.message_type == 'group' || params.group_id) {
@@ -56,7 +68,7 @@ index 3879f57..bf467bb 100644
          sendRet = await bot.pickFriend?.(params.user_id).sendMsg?.(sendMsg, quote)
        }
        logger.info(`[ws-plugin] 连接名字:${name} 处理完成`)
-@@ -267,22 +242,8 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+@@ -267,22 +244,8 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
          if (match) forward_id = match[1]
        }
        if (params.group_id) {
@@ -79,7 +91,7 @@ index 3879f57..bf467bb 100644
          sendRet = await bot.pickFriend(params.user_id).sendMsg(forwardMsg)
        }
        if (sendRet && forward_id) {
-@@ -301,13 +262,6 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+@@ -301,13 +264,6 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
          let match = forwardMsg.data?.match(/m_resid="(.*?)"/)
          if (match) forward_id = match[1]
        }
@@ -93,7 +105,7 @@ index 3879f57..bf467bb 100644
        sendRet = await bot.pickGroup(params.group_id).sendMsg(forwardMsg)
        if (sendRet && forward_id) {
          sendRet.forward_id = forward_id
-@@ -325,13 +279,6 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+@@ -325,13 +281,6 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
          let match = forwardMsg.data.match(/m_resid="(.*?)"/)
          if (match) forward_id = match[1]
        }
@@ -107,7 +119,50 @@ index 3879f57..bf467bb 100644
        sendRet = await bot.pickFriend(params.user_id).sendMsg(forwardMsg)
        if (sendRet && forward_id) {
          sendRet.forward_id = forward_id
-@@ -1100,6 +1047,13 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+@@ -555,32 +504,21 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
+     },
+     // 获取群成员列表
+     get_group_member_list: async (params) => {
+-      const group = await bot.pickGroup(params.group_id)
+-      let list = await group.getMemberMap?.() || await group.getMemberList?.() || []
++      const bound = getQQBotBoundMembers(bot, params.group_id, requestedGroupId, adapter)
++      const group = bound === null ? await bot.pickGroup(params.group_id) : null
++      let list = bound ?? await group?.getMemberMap?.() ?? await group?.getMemberList?.() ?? []
+       if (list instanceof Map) {
+         list = Array.from(list.values())
+       }
++      if (!Array.isArray(list)) list = Object.values(list || {})
+       const group_id = await getGroup_id({ group_id: params.group_id })
+-      for (const i in list) {
+-        list[i].group_id = group_id
+-        list[i].user_id = await getUser_id({ user_id: list[i].user_id })
+-        if (list[i].group_name) {
+-          list[i].group_memo = list[i].group_name
+-        }
+-        if (list[i].shutup_time) {
+-          list[i].shut_up_timestamp = list[i].shutup_time
+-        }
+-        if (!list[i].last_sent_time) {
+-          list[i].last_sent_time = Date.now()
+-        }
+-        if (!list[i].role) {
+-          list[i].role = 'member'
+-        }
+-        if (!list[i].sex) {
+-          list[i].sex = 'unknown'
+-        }
++      ResponseData = []
++      const now = Math.floor(Date.now() / 1000)
++      for (const member of list) {
++        const user_id = bound !== null ? Number(member.user_id) : await getUser_id({ user_id: member.user_id })
++        if (!Number.isSafeInteger(Number(user_id)) || Number(user_id) <= 0) continue
++        ResponseData.push(normalizeGroupMember(member, bound !== null ? member.group_id || group_id : group_id, user_id, now, bound !== null))
+       }
+-      ResponseData = list
+     },
+     // 获取群荣誉信息
+     // TODO get_group_honor_info
+@@ -1100,6 +1038,13 @@ async function getApiData (api, params = {}, name, uin, adapter, other = {}) {
    api = api?.replace(/_async$/, '')
    if (typeof publicApi[api] === 'function') {
      await publicApi[api](params)
@@ -156,3 +211,54 @@ index efcf5b0..b176b83 100644
        default:
          break
      }
+diff --git a/model/groupMembers.js b/model/groupMembers.js
+new file mode 100644
+index 0000000..d621b5c
+--- /dev/null
++++ b/model/groupMembers.js
+@@ -0,0 +1,45 @@
++/** QQBot exposes bound QQ users only. No whitelist-only official request is made. */
++export function getQQBotBoundMembers (bot, groupId, requestedGroupId, adapter) {
++  const mapper = globalThis.Bot?.QQBotIdMap
++  const marker = bot?.adapter
++  const route = bot?.__qqbotIdMapRoutes?.groups?.get(Number(groupId)) || bot?.__qqbotIdMapRoutes?.groups?.get(Number(requestedGroupId))
++  const isQQBot = !!route || adapter?.name === 'QQBot' || marker === 'QQBot' || marker?.id === 'QQBot' || bot?.qqbot_bot?.adapter === 'QQBot'
++  if (!isQQBot) return null
++  if (!mapper?.getCachedGroupMemberMap) return []
++  mapper.load()
++  let appid = route?.qqbotSelfId || bot?.qqbot_bot?.config?.appid || bot?.config?.appid
++  if (!appid) {
++    appid = Object.keys(mapper.data.bots || {}).find(id => String(mapper.getBoundBotQQ(id)) === String(bot?.uin)) || bot?.uin
++  }
++  const numeric = /^\d+$/.test(String(groupId))
++  return Array.from(mapper.getCachedGroupMemberMap({
++    self_id: String(appid),
++    group_openid: route?.groupOpenid || (numeric ? '' : groupId),
++    group_qq: numeric ? Number(groupId) : Number(requestedGroupId) || '',
++    qq_self_id: bot?.uin
++  }).values())
++}
++
++/** Exact OneBot field types; timestamp defaults are Unix seconds, not milliseconds. */
++export function normalizeGroupMember (member, groupId, userId, now = Math.floor(Date.now() / 1000), boundOnly = false) {
++  const data = member?.info ? { ...member, ...member.info } : member || {}
++  const number = value => Number.isFinite(Number(value)) ? Number(value) : 0
++  const string = value => typeof value === 'string' && value.length ? value : ' '
++  return {
++    group_id: number(groupId),
++    user_id: number(userId),
++    nickname: string(data.nickname),
++    card: string(data.card),
++    sex: boundOnly ? ' ' : string(data.sex),
++    age: boundOnly ? 0 : number(data.age),
++    area: boundOnly ? ' ' : string(data.area),
++    join_time: boundOnly ? now : number(data.join_time) || now,
++    last_sent_time: boundOnly ? now : number(data.last_sent_time) || now,
++    level: boundOnly ? ' ' : string(data.level),
++    role: string(data.role),
++    unfriendly: boundOnly ? false : data.unfriendly === true,
++    title: boundOnly ? ' ' : string(data.title),
++    title_expire_time: boundOnly ? now : number(data.title_expire_time) || now,
++    card_changeable: boundOnly ? false : data.card_changeable === true
++  }
++}

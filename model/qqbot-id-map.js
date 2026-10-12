@@ -722,8 +722,13 @@ class QQBotIdMap {
           qq_self_id: selfId,
           fallbackBot: bot
         })
-      } else if (typeof e.group?.getMemberMap !== 'function') {
-        e.group.getMemberMap = async () => new Map()
+      } else {
+        // The OneBot member-list API is always safe to serve from bound users.
+        // Disabling member-list conversion must not leave a native ICQQ network request here.
+        e.group.getMemberMap = async () => this.getCachedGroupMemberMap({
+          self_id: qqbotSelfId, group_openid: groupOpenid, group_qq: groupQQ, qq_self_id: selfId
+        })
+        e.group.getMemberList = async () => Array.from((await e.group.getMemberMap()).values())
       }
       if (typeof e.group?.getChatHistory !== 'function') {
         e.group.getChatHistory = async () => []

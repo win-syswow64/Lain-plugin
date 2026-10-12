@@ -62,3 +62,6 @@ QQBot.js
 
 # Independent button repository and personal extensions.
 /plugins/button/
+
+# Local reference checkout; managed by its own Git repository.
+/Yunzai-QQBot-Plugin/

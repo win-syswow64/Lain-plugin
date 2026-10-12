@@ -10,6 +10,11 @@ default:
     secret:                               # 机器人密钥
     maxRetry: 10                          # 重连次数
     toCallback: true                      # QQGuild频道callback兼容选项；QQ群/C2C显式callback始终使用回调
+    markdown:                            # 每个 AppID 单独配置：raw / legacy / template
+      mode: raw
+      templateId: ""                     # 模板模式或 raw 失败后降级的模板 ID
+      params: []                         # 模板参数名，按正文各行填充，最后一个参数接收剩余正文
+    smallbtn: false                       # 原生小按钮；也可单条消息使用 segment.custom('small')
     other:                                # 其他配置
       Prefix: true                        # QQ频道、QQ群Bot前缀转换 [/] => [#]   true-开启  false-关闭
       QQCloud:                            # QQ群Bot => QQ图床，填写QQ号。需使用QQ发送图片
