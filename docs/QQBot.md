@@ -385,7 +385,7 @@ Lain-plugin 不再跟踪 `ws-plugin/` 和 `22009-plugin/` 目录，保留已有�
 群聊、C2C 私聊共用同一上传入口。普通文件、图片、视频、语音均检查实际字节数，来源支持本地路径、Buffer、base64 和 HTTP/HTTPS URL。阈值按 `5 * 1024 * 1024` 字节（5MiB）计算：不超过阈值使用 `/files` 的 `file_data` 二进制直传；超过阈值一律使用官方分片流程，URL 也先下载核实大小，不仅依赖 Content-Length。
 
 1. 调用对应会话的 `/upload_prepare`，传入 `file_type`、文件名、大小、完整 MD5/SHA1，以及前 10002432 字节的 MD5。
-2. 按返回的分片大小和序号 PUT 到预签名 URL，每片成功后调用 `/upload_part_finish`；失败按服务端给出的重试超时和延迟重试。
+2. 按返回的分片大小和序号 PUT 到预签名 URL，每片成功后调用 `/upload_part_finish`；失败按服务端给出的重试超时和延迟重试。兼容服务端从 0 或 1 开始的连续分片序号，完成通知透传原序号；重复、缺失或不连续的序号会返回错误。
 3. 全部分片完成后调用 `/files`，携带 `upload_id` 合并取得 `file_info`；上传阶段使用 `srv_send_msg: false`。
 4. 通过该会话的消息接口发送 `msg_type: 7` 和 `media.file_info`，保留原有的 `msg_id/event_id` 回复上下文。
 

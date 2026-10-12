@@ -1100,7 +1100,11 @@ export default class adapterQQBot {
     if (!uploadId || !parts.length || !Number.isSafeInteger(blockSize) || blockSize <= 0) {
       throw new Error('QQBot 分片上传失败：预上传响应缺少 upload_id、block_size 或 parts')
     }
-    if (parts.some((part, index) => Number(part.index) !== index || !part.presigned_url ||
+    // 文档示例从 0 开始，线上群聊/C2C 接口也会返回从 1 开始的序号。
+    // 保留服务端的序号用于 upload_part_finish，不能自行重新编号。
+    const firstIndex = Number(parts[0].index)
+    if (![0, 1].includes(firstIndex) || parts.some((part, index) => part.index == null || part.index === '' ||
+      Number(part.index) !== firstIndex + index || !part.presigned_url ||
       (part.block_size != null && (!Number.isSafeInteger(Number(part.block_size)) || Number(part.block_size) <= 0)))) {
       throw new Error('QQBot 分片上传失败：分片序号、大小或预签名地址无效')
     }
