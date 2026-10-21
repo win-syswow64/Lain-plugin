@@ -42,6 +42,7 @@ export class qqbotMuteTest extends plugin {
         ? `禁言测试成功：已解除 ${target} 的禁言。`
         : `禁言测试成功：已将 ${target} 禁言 ${duration} 秒。`)
     } catch (error) {
+      if (error.qqbot_user_notified) return true
       return await e.reply(`禁言测试失败：${error?.message || error}`)
     }
   }

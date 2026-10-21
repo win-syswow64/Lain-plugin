@@ -43,6 +43,7 @@ export class QQBotJoinRequest extends plugin {
       })
       return await e.reply(this.formatRequestList(result, target.groupId), true)
     } catch (error) {
+      if (error.qqbot_user_notified) return true
       return await e.reply(`拉取入群申请失败：${error?.message || error}`, true)
     }
   }
@@ -78,6 +79,7 @@ export class QQBotJoinRequest extends plugin {
         add_to_member_blacklist: addToMemberBlacklist
       })
     } catch (error) {
+      if (error.qqbot_user_notified) return true
       return await e.reply(`审批入群申请失败：${error?.message || error}`, true)
     }
 

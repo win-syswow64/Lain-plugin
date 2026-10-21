@@ -133,7 +133,11 @@ await e.markdown('请选择操作：', {
 
 统一策略处理 HTTP 请求失败及 HTTP 200 中的非零业务错误码，不会把异常响应当作成功数据。同一机器人、方法、接口与错误每分钟记录一份样例，日志前缀为 `[QQBot 白名单接口异常留样]`，包含 AppID、接口模板、错误码、可取得的 HTTP 状态、错误文字与追踪 ID；不记录凭据、请求体或成员资料。
 
-接收消息时查询群状态属于可选接口，失败返回未知状态，消息仍正常分发。失败状态短暂缓存 10 秒，避免每条消息重复请求。功能必须依赖该接口时，例如查询管理员身份、禁言前确认权限、主动消息或文件发送前确认推送权限，调用仍会失败，并返回可由插件回复的错误信息。官方 `11253` 或明确的白名单拒绝文字会转换为“账户不在接口白名单内，无法使用该功能（方法 接口）”；网络故障、限流、字段不完整及普通权限不足保留各自原因，不误报白名单。
+生产环境 API 与 access token 获取使用官方统一地址 `https://api.bot.qq.com`；显式开启的 SDK 沙箱仍使用原沙箱地址。错误处理同时识别新版 `err_code` 和旧版 `code`，并在旧 SDK 丢弃响应前保留 HTTP 状态、错误码与 TraceID，详见官方[API 调用指南](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/api-call-guide.html)。
+
+接收消息时查询群状态属于可选接口，失败返回未知状态，消息仍正常分发。失败状态短暂缓存 10 秒，避免每条消息重复请求。功能必须依赖该接口时，例如查询管理员身份、禁言前确认权限、主动消息或文件发送前确认推送权限，调用仍会失败。官方 `11253` 或明确的白名单拒绝文字会转换为“当前机器人暂无xx接口权限”，其中 xx 为接口功能，例如“当前机器人暂无获取群成员列表接口权限”。网络故障、限流、字段不完整及普通权限不足保留各自原因。
+
+普通消息命令和回调按钮执行期间，适配器自动通过当前消息的 `e.reply()` 发送权限提示；群聊、私聊分别保存各自的异步上下文，并在同一次消息处理中按接口去重。即使没有列在上表中，其他 SDK 接口返回 `11253` 时也使用相同提示，未知接口以路径表示功能。可选后台查询只留日志，不自动回复。脱离消息上下文的定时任务、控制台或主动 API 调用仍抛出错误，由调用者决定提示发送到哪里。
 
 ```js
 // 可选状态查询：失败返回 null，只记录日志。
@@ -145,11 +149,11 @@ try {
   const isAdmin = await e.group.is_admin()
   await e.reply(isAdmin ? '机器人是群管理员' : '机器人不是群管理员')
 } catch (error) {
-  await e.reply(error.message)
+  if (!error.qqbot_user_notified) await e.reply(error.message)
 }
 ```
 
-自定义 SDK 调用中，可选白名单请求可以传 `qqbotOptional: true`。失败响应为 `{ data: null, qqbot_api_error: Error }`，必须先检查错误或空数据；未标记可选的调用默认属于功能必需调用，失败拒绝 Promise。该选项只作用于上表 API，普通消息、上传、撤回及其他接口保留原有错误处理。
+自定义 SDK 调用中，可选白名单请求可以传 `qqbotOptional: true`。失败响应为 `{ data: null, qqbot_api_error: Error }`，必须先检查错误或空数据；未标记可选的调用默认属于功能必需调用，失败拒绝 Promise。该选项作用于上表 API，以及其他接口返回的 `11253`。SDK 的 HTTP 200 非零业务错误码也会拒绝 Promise，避免把失败数据视为成功。
 
 ```js
 const response = await bot.sdk.request.get(
@@ -179,6 +183,22 @@ if (response.data) console.log(response.data.group_name)
 只有机器人进退群才更新机器人群列表；普通成员退群不会删除机器人所在群。插件可以监听 `notice.group.increase` 或 `notice.group.decrease`，通过 `e.qqbot_is_robot_change` 区分对象，并用 `e.group.sendMsg()` 或 `e.reply()` 发送消息。通知中的发送采用主动群消息规则，需群开启主动推送并通过权限检查。
 
 参考官方[机器人加入群聊](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_add_robot.html)、[机器人退出群聊](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_del_robot.html)、[群成员加入](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_member_add.html)和[群成员退出](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_member_remove.html)。
+
+## @全体成员
+
+接收到官方群消息中的 `<@all>` 时，适配器生成 ICQQ 消息段 `{ type: 'at', qq: 'all', text: '@全体成员' }`，同时设置 `e.atall = true`。其他消息的 `atall` 为 false。身份转换后仍保留此消息段，不会把 `all` 当作 QQ 号绑定。
+
+`GROUP_AT_MESSAGE_CREATE` 的正文已经去除了 @机器人的前缀；适配器只移除能明确识别为机器人自己的 @，保留正文中其他成员及全体成员的 @。插件可以按 ICQQ 的方式读取和发送：
+
+```js
+if (e.atall) console.log('这条消息包含 @全体成员')
+await e.reply([segment.at('all'), ' 请查看群通知'])
+// 也接受 { type: 'at', qq: 'all' }、id: 'all'、user_id: 'all'。
+```
+
+Markdown 使用 `<qqbot-at-everyone />`；普通文本/媒体消息统一使用 `<@all>`。私聊不会发送群 @ 指令。实际是否允许提醒全体成员仍由 QQ 的群权限和平台规则决定。
+
+事件结构参考官方[群 @机器人消息](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_at_message_create.html)和[群全量消息](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_message_create.html)。
 
 ## QQ 群全量消息与 @ 机器人消息
 
@@ -370,6 +390,45 @@ Yz:count:send:image:bot:<机器人ID>:total
 
 机器人 ID 包含 AppID 和已绑定的数字机器人 QQ 号，保证原生 QQBot 与 ICQQ 转译后的 `bot.uin` 都能查询。计数通过 Redis Lua 原子递增，并发消息不会因读写覆盖丢失。
 
+## 群成员管理的 ICQQ 接口
+
+`Bot[AppID]`、`e.bot`、`e.group` 和 `pickMember()` 提供以下入口。身份转换后仍调用 QQBot 官方 API；数字 QQ 号只使用目标群已有的成员 OpenID 绑定，不能使用其他群或私聊的 OpenID 代替。未绑定成员可以直接传官方 `member_openid` 或 `AppID-member_openid`。
+
+| ICQQ / 兼容入口 | 返回值与行为 |
+| --- | --- |
+| `bot.getGroupMemberList(groupId, noCache)` | `Map<成员ID, MemberInfo>`，自动读取所有分页 |
+| `group.getMemberMap(noCache)` | 同上；列表缓存 30 秒，`true` 强制重新拉取 |
+| `group.getMemberList(noCache)` | 成员信息数组 |
+| `bot.getGroupMemberInfo(groupId, userId, noCache)` / `group.getMemberInfo(userId, noCache)` | 获取成员详情；`true` 跳过列表缓存 |
+| `group.pickMember(userId).renew()` / `bot.pickMember(groupId, userId).renew()` | 强制刷新，更新成员对象的 `info/is_admin/is_owner` |
+| `group.kickMember(userId, message, block)` / `member.kick(message, block)` | 移除一名成员，成功返回 true；`block=true` 同时拉黑 |
+| `bot.setGroupKick(groupId, userId, rejectAddRequest, message)` | ICQQ 客户端旧接口，`rejectAddRequest=true` 同时拉黑 |
+| `group.removeMembers(users, block)` / `bot.removeGroupMembers(groupId, users, block)` | 批量移除，返回官方响应；一次 1 至 20 人 |
+| `group.getBlacklist()` / `bot.getGroupBlacklist(groupId)` | 自动翻页，返回黑名单成员 Map |
+| `group.setMemberBlacklist(users, enabled)` / `bot.setGroupMemberBlacklist(groupId, users, enabled)` | `true` 加入、`false` 移出，一次 1 至 20 人 |
+| `group.addToBlacklist(users)` / `group.removeFromBlacklist(users)` | 黑名单增删的简写 |
+| `member.setBlacklist(enabled)` | 操作单个成员的群黑名单 |
+
+成员信息包含 ICQQ 的 `group_id/user_id/nickname/card/role/join_time/level/sex/age/title/shutup_time/update_time` 等字段，并保留官方 `member_openid/group_openid/union_openid/is_robot`。未知数值为 0，性别为 unknown，其他未知字符串为空串。成员列表转换开关启用时，已有绑定的群号、QQ 号使用数字；未绑定成员保持 `AppID-OpenID`，不会伪造 QQ 号。
+
+需要自行控制分页时，使用 `group.getMemberPage({ cursor })` 或 `bot.getGroupMemberPage(groupId, { cursor })`，返回原始 `{ members, next_cursor }`。黑名单对应 `getBlacklistPage({ cursor, limit })` 和 `bot.getGroupBlacklistPage(groupId, options)`，返回 `{ users, next_cursor }`，limit 为 1 至 100。
+
+```js
+const members = await e.group.getMemberMap()
+const member = e.group.pickMember(targetId)
+const info = await member.renew()
+console.log(info.nickname, info.role)
+
+// 踢人并禁止重新入群。
+await e.group.kickMember(targetId, undefined, true)
+// 允许重新申请入群。
+await e.group.removeFromBlacklist([targetId])
+```
+
+黑名单新增要求目标已不在群内；对在群成员应使用踢人时的 `block=true`。`message` 参数为 ICQQ 签名兼容参数，官方移除接口没有理由字段，因此不会上传该参数。旧插件的 `group.kickMember(userId, rejectAddRequest)` 布尔第二参数也支持。
+
+如果移除成功但拉黑失败，会抛出带 `qqbot_partial_success: true` 的错误；黑名单部分成员失败同样会报错，并提供 `failed_member_openids`，不会把部分失败报告为全部成功。以上成员管理 API 目前属于内邀能力，返回 `11253` 时按前述规则提示具体接口权限；不会把失败伪装成空列表。
+
 ## ws-plugin 群成员列表
 
 Lain-plugin 不再跟踪 `ws-plugin/` 和 `22009-plugin/` 目录，保留已有本地插件及独立仓库；兼容补丁仍随本体维护。
@@ -382,7 +441,7 @@ Lain-plugin 不再跟踪 `ws-plugin/` 和 `22009-plugin/` 目录，保留已有�
 
 ## 大文件与分片上传
 
-群聊、C2C 私聊共用同一上传入口。普通文件、图片、视频、语音均检查实际字节数，来源支持本地路径、Buffer、base64 和 HTTP/HTTPS URL。阈值按 `5 * 1024 * 1024` 字节（5MiB）计算：不超过阈值使用 `/files` 的 `file_data` 二进制直传；超过阈值一律使用官方分片流程，URL 也先下载核实大小，不仅依赖 Content-Length。
+群聊、C2C 私聊共用同一上传入口。普通文件、图片、视频、语音均检查实际字节数，来源支持本地路径、Buffer、base64 和 HTTP/HTTPS URL。开启 Markdown 时，小于 10MiB 的支持格式图片优先使用下述素材接口；其他富媒体以 `5 * 1024 * 1024` 字节（5MiB）为阈值：不超过阈值使用 `/files` 的 `file_data` 二进制直传，超过阈值使用官方分片流程。URL 先下载核实大小，不仅依赖 Content-Length。
 
 1. 调用对应会话的 `/upload_prepare`，传入 `file_type`、文件名、大小、完整 MD5/SHA1，以及前 10002432 字节的 MD5。
 2. 按返回的分片大小和序号 PUT 到预签名 URL，每片成功后调用 `/upload_part_finish`；失败按服务端给出的重试超时和延迟重试。兼容服务端从 0 或 1 开始的连续分片序号，完成通知透传原序号；重复、缺失或不连续的序号会返回错误。
@@ -394,6 +453,29 @@ Lain-plugin 不再跟踪 `ws-plugin/` 和 `22009-plugin/` 目录，保留已有�
 Markdown 中的大图片也分片上传，并使用合并响应的 `raw_url` 显示；遇到软限制降级或没有可用 `raw_url` 时，以附件发送并保留正文提示。legacy 模式的大媒体、普通文件及 C2C 流式回复中的大图片也使用此流程。文件必须可由机器人服务器读取；本地无法下载的 URL 会回复上传失败原因。
 
 协议依据：[官方群富媒体上传](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_files.post.html)、[官方单聊富媒体上传](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_files.post.html)、[群预上传](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_id_upload_prepare.post.html)与[单聊预上传](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_id_upload_prepare.post.html)。
+
+## Markdown 图片素材
+
+`raw` 和模板 Markdown 模式下，单张实际大小严格小于 `10 * 1024 * 1024` 字节的 PNG、JPEG、GIF、WebP 图片默认上传到官方素材库。普通图片消息、本地文件、Buffer、base64、URL 图片、Markdown 内的公网图片和 C2C Markdown 流均适用；legacy 模式继续使用普通富媒体上传。等于或超过此阈值、或格式不支持的图片继续使用原有图床/富媒体流程，超过 5MiB 时走分片上传。
+
+流程为：
+
+1. 根据图片内容识别格式，生成匹配 MIME 的文件名，向 `/v2/media-images/prepare` 提交大小、MD5 和 SHA1。
+2. PUT 图片二进制到返回的预签名 URL，Content-Type 与申请时完全一致；核对返回的 ETag 与文件 MD5。
+3. 向 `/v2/media-images/complete` 提交 upload_id 和 ETag，取得 `qqbot-media://image/v1/<token>`。
+4. 在原有 Markdown 图片位置替换链接，保留尺寸、说明、按钮和 `msg_id/event_id` 回复上下文。token 保持原样，不能编码其中的下划线或改成预览链接。
+
+```js
+// 无需手工调用素材接口。
+await e.reply(segment.image('/path/to/panel.png'))
+await e.markdown('![面板 #960px #2160px](https://example.com/panel.jpg)')
+```
+
+相同机器人按图片 MD5 复用素材，并合并并发上传。引用及 image_id 保存到被 Git 忽略的 `data/QQBot-materials/<AppID>.json`，不会跨机器人复用。图片成功被消息引用后，缓存的 90 天滑动期限才顺延。临时 `preview_url` 只在内存短时保存，格式降级为普通媒体时才用它下载图片，不持久化。
+
+官方每个机器人最多 100 张有效素材。适配器在自身缓存达到 90 张时清理最久未使用的自有素材，为其他功能留出配额；接口返回 `40035007` 时也会尝试释放一张自有素材并重试。不会删除其他插件或开发者上传且未记入本缓存的素材。官方说明删除不影响已经发送消息中的图片。
+
+普通网络、格式、配额或上传错误会在日志留下错误码并回退到原图片流程。`11253` 按统一权限策略报错，不会被静默回退掩盖。流程依据官方[素材管理](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/material-management.html)。
 
 ## 相关文档
 

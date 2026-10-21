@@ -5,6 +5,7 @@ import axios from 'axios'
 import Cfg from '../../../../lib/config/config.js'
 import common from '../../lib/common/common.js'
 import { installQQBotAPIPolicy } from './APIPolicy.js'
+import { normalizeMentions, isAtAll } from './Mentions.js'
 
 export default class QQSDK {
   constructor (config) {
@@ -67,6 +68,7 @@ export default class QQSDK {
 
     /** 创建机器人 */
     this.sdk = new QQBot(this.config)
+    if (!this.config.sandbox) this.sdk.request.defaults.baseURL = 'https://api.bot.qq.com'
     installQQBotAPIPolicy(this.sdk)
     this.patchSessionManager()
     this.patchLogger()
@@ -150,7 +152,7 @@ export default class QQSDK {
     if (this.accessTokenPromise) return this.accessTokenPromise
 
     this.accessTokenPromise = axios.post(
-      'https://bots.qq.com/app/getAppAccessToken',
+      'https://api.bot.qq.com/app/getAppAccessToken',
       {
         appId: this.config.appid,
         clientSecret: this.config.secret || this.config.clientSecret
@@ -339,6 +341,7 @@ export default class QQSDK {
 
     const wrapped = function (event, payload) {
       payload = payload || {}
+      if (!Array.isArray(payload.mentions)) payload.mentions = []
       const reference = QQSDK.getMessageReference(payload)
       // QQ 群消息的引用信息位于 message_scene.ext 和 msg_elements，旧 SDK
       // 只识别 message_reference，导致引用段与 source 丢失。
@@ -357,6 +360,10 @@ export default class QQSDK {
 
       if (result && officialMessage?.length) {
         result.message = officialMessage
+      }
+      if (result && Array.isArray(result.message)) {
+        result.message = normalizeMentions(result.message, payload.mentions || [])
+        result.atall = result.message.some(isAtAll)
       }
       if (result && officialRawMessage !== null) {
         result.raw_message = officialRawMessage

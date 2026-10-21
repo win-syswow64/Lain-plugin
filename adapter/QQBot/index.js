@@ -15,7 +15,10 @@ import Button from './plugins.js'
 import QQBotButton from './Button.js'
 import C2CStream from './C2CStream.js'
 import QQBotIdMap from '../../model/qqbot-id-map.js'
-import { installQQBotAPIPolicy, normalizeRestrictedAPIError } from './APIPolicy.js'
+import { installQQBotAPIPolicy, normalizeRestrictedAPIError, withQQBotAPIContext, reportQQBotAPIError, getQQBotAPIErrorCode } from './APIPolicy.js'
+import ImageMaterials, { IMAGE_MATERIAL_LIMIT, isMaterialURL } from './ImageMaterials.js'
+import GroupMembers from './GroupMembers.js'
+import { atTarget, isAtAll, normalizeMentions } from './Mentions.js'
 import { getMessagePolicy, getMessageVariants, getSmallSetting, withMicroKeyboard } from './MessagePolicy.js'
 import { recordQQBotCount, readQQBotCount } from '../../model/qqbot-dau.js'
 import { DIRECT_UPLOAD_LIMIT, HARD_UPLOAD_LIMIT, getUploadFileType, downloadUploadFile } from './UploadPolicy.js'
@@ -49,9 +52,11 @@ export default class adapterQQBot {
       data = await this.message(data, true)
       if (data) {
         await QQBotIdMap.handleQQBotGroupMessage(data, async e => {
-          QQBotIdMap.logDebug(this.id, 'QQBot传入云崽message.group', e)
-          await Bot.emit('message.group', e)
-          await Bot.emit('message', e)
+          await withQQBotAPIContext(e, async () => {
+            QQBotIdMap.logDebug(this.id, 'QQBot传入云崽message.group', e)
+            await Bot.emit('message.group', e)
+            await Bot.emit('message', e)
+          })
         })
       }
     })
@@ -61,8 +66,10 @@ export default class adapterQQBot {
       data = await this.message(data)
       if (data) {
         await QQBotIdMap.handleQQBotPrivateMessage(data, async e => {
-          await Bot.emit('message.private', e)
-          await Bot.emit('message', e)
+          await withQQBotAPIContext(e, async () => {
+            await Bot.emit('message.private', e)
+            await Bot.emit('message', e)
+          })
         })
       }
     })
@@ -141,10 +148,18 @@ export default class adapterQQBot {
       readMsg: async () => common.recvMsg(this.id, 'QQBot', true),
       MsgTotal: async (type) => common.MsgTotal(this.id, 'QQBot', type, true),
       pickGroup: (groupID) => this.pickGroup(groupID),
+      pickMember: (groupId, userId) => this.pickMember(groupId, userId),
       pickUser: (userId) => this.pickFriend(userId),
       pickFriend: (userId) => this.pickFriend(userId),
       makeForwardMsg: async (data) => await common.makeForwardMsg(data),
-      getGroupMemberInfo: (group_id, user_id) => Bot.getGroupMemberInfo(group_id, user_id),
+      getGroupMemberList: (groupId, noCache) => this.membersAPI.list(groupId, noCache),
+      getGroupMemberInfo: (groupId, userId, noCache) => this.membersAPI.info(groupId, userId, noCache),
+      setGroupKick: (groupId, userId, rejectAddRequest = false, message) => this.membersAPI.kick(groupId, userId, message, rejectAddRequest),
+      getGroupMemberPage: (groupId, options) => this.membersAPI.page(groupId, options),
+      removeGroupMembers: (groupId, users, block) => this.membersAPI.remove(groupId, users, block),
+      getGroupBlacklist: groupId => this.membersAPI.blacklist(groupId),
+      getGroupBlacklistPage: (groupId, options) => this.membersAPI.blacklistPage(groupId, options),
+      setGroupMemberBlacklist: (groupId, users, enabled) => this.membersAPI.setBlacklist(groupId, users, enabled),
       /** QQ Bot v2 群管理：群禁言与入群自动审批策略。 */
       getGroupMuteStatus: async groupId => await this.getGroupMuteStatus(groupId),
       getGroupBotState: async (groupId, options) => await this.getGroupBotState(groupId, options),
@@ -364,8 +379,17 @@ export default class adapterQQBot {
   }
 
   /** 群对象 */
+  get membersAPI () {
+    return this.groupMembersAPI ||= new GroupMembers(this)
+  }
+
+  get materialsAPI () {
+    return this.imageMaterials ||= new ImageMaterials(this)
+  }
+
   pickGroup(groupID) {
     return {
+      group_id: this.formatQQBotId(groupID),
       /** 查询机器人在群内是否为管理员；群主同时视为管理员。 */
       is_admin: async () => {
         const state = await this.getGroupBotState(groupID)
@@ -381,9 +405,16 @@ export default class adapterQQBot {
       makeForwardMsg: async (data) => await common.makeForwardMsg(data),
       getMsg: async (msg_id) => await this.getCachedMessage('group', groupID, msg_id),
       getChatHistory: async (msg_id, num = 1) => await this.getCachedChatHistory('group', groupID, msg_id, num),
-      // Return only locally bound QQ users; never query the restricted official member API.
-      getMemberMap: async () => this.getBoundGroupMemberMap(groupID),
-      getMemberList: async () => Array.from(this.getBoundGroupMemberMap(groupID).values()),
+      getMemberMap: noCache => this.membersAPI.list(groupID, noCache),
+      getMemberList: async noCache => Array.from((await this.membersAPI.list(groupID, noCache)).values()),
+      getMemberInfo: (userId, noCache) => this.membersAPI.info(groupID, userId, noCache),
+      getMemberPage: options => this.membersAPI.page(groupID, options),
+      getBlacklist: () => this.membersAPI.blacklist(groupID),
+      getBlacklistPage: options => this.membersAPI.blacklistPage(groupID, options),
+      setMemberBlacklist: (users, enabled = true) => this.membersAPI.setBlacklist(groupID, users, enabled),
+      addToBlacklist: users => this.membersAPI.setBlacklist(groupID, users, true),
+      removeFromBlacklist: users => this.membersAPI.setBlacklist(groupID, users, false),
+      removeMembers: (users, block = false) => this.membersAPI.remove(groupID, users, block),
       /** OneBot upload_group_file 兼容；QQ群 Bot 不支持目录，folder 参数会被忽略。 */
       fs: {
         upload: async (file, folder = '/', name) => await this.sendGroupFile(groupID, file, name)
@@ -408,7 +439,7 @@ export default class adapterQQBot {
       /** 设置管理 */
       setAdmin: async (qq, type) => Promise.reject(new Error('QQBot未支持')),
       /** 踢 */
-      kickMember: async (qq, rejectAddRequest = false) => Promise.reject(new Error('QQBot未支持')),
+      kickMember: (userId, message, block = false) => this.membersAPI.kick(groupID, userId, message, block),
       /** 头衔 **/
       setTitle: async (qq, title, duration) => Promise.reject(new Error('QQBot未支持')),
       /** 修改群名片 **/
@@ -443,10 +474,17 @@ export default class adapterQQBot {
   }
 
   pickMember(groupID, userID) {
-    return {
-      member: this.member(groupID, userID),
-      getAvatarUrl: (size = 0) => this.getAvatarUrl(size, userID)
+    const member = this.member(groupID, userID)
+    // 保留旧版 .member 入口，同时支持 ICQQ 的 pickMember(...).renew()/kick()/mute()。
+    const picked = { ...member, member }
+    for (const key of ['info', 'is_owner', 'is_admin', 'group_id', 'user_id']) {
+      Object.defineProperty(picked, key, {
+        enumerable: true,
+        get: () => member[key],
+        set: value => { member[key] = value }
+      })
     }
+    return picked
   }
 
   getBoundGroupMemberMap (groupID) {
@@ -460,20 +498,34 @@ export default class adapterQQBot {
   }
 
   member(groupId, userId) {
+    const cached = this.membersAPI.peek(groupId, userId)
+    const update = async noCache => {
+      member.info = await this.membersAPI.info(groupId, userId, noCache)
+      member.group_id = member.info.group_id
+      member.user_id = member.info.user_id
+      member.is_owner = member.info.role === 'owner'
+      member.is_admin = member.is_owner || member.info.role === 'admin'
+      return member.info
+    }
     const member = {
-      info: {
-        group_id: `${this.id}-${groupId}`,
-        user_id: `${this.id}-${userId}`,
+      info: cached || {
+        group_id: this.formatQQBotId(groupId),
+        user_id: this.formatQQBotId(userId),
         nickname: '',
         last_sent_time: ''
       },
-      group_id: `${this.id}-${groupId}`,
-      is_admin: false,
-      is_owner: false,
+      group_id: cached?.group_id || QQBotIdMap.normalizeQQ(groupId) || this.formatQQBotId(groupId),
+      user_id: cached?.user_id || QQBotIdMap.normalizeQQ(userId) || this.formatQQBotId(userId),
+      is_admin: ['admin', 'owner'].includes(cached?.role),
+      is_owner: cached?.role === 'owner',
       /** 获取头像 */
       getAvatarUrl: (size = 0) => this.getAvatarUrl(size, userId),
       /** 禁言当前成员；time 为秒数，传 0 可解除禁言。 */
-      mute: async (time) => await this.setGroupMemberMute(groupId, userId, time)
+      mute: async (time) => await this.setGroupMemberMute(groupId, userId, time),
+      renew: () => update(true),
+      getInfo: () => update(false),
+      kick: (message, block = false) => this.membersAPI.kick(groupId, userId, message, block),
+      setBlacklist: (enabled = true) => this.membersAPI.setBlacklist(groupId, [userId], enabled)
     }
     return member
   }
@@ -497,19 +549,20 @@ export default class adapterQQBot {
     const cached = this.groupBotStateCache.get(key)
     if (!fresh && cached && cached.expires > Date.now()) {
       if (cached.error) {
-        if (required) throw cached.error
+        if (required) { await reportQQBotAPIError(cached.error); throw cached.error }
         return null
       }
       return cached.value
     }
     if (cached?.pending) {
       try { return await cached.pending } catch (error) {
-        if (required) throw error
+        if (required) { await reportQQBotAPIError(error); throw error }
         return null
       }
     }
-    const pending = this.sdk.request.get(`/v2/groups/${encodeURIComponent(groupOpenid)}/bot_state`)
-      .then(({ data }) => {
+    const pending = this.sdk.request.get(`/v2/groups/${encodeURIComponent(groupOpenid)}/bot_state`, { qqbotOptional: !required })
+      .then(({ data, qqbot_api_error: error }) => {
+        if (error) throw error
         if (!data || typeof data.allow_proactive_msg !== 'boolean' || !data.recv_msg_setting || !data.member_role) {
           throw new Error('QQ群状态接口返回字段不完整，无法验证群权限')
         }
@@ -525,7 +578,7 @@ export default class adapterQQBot {
       })
     this.groupBotStateCache.set(key, { pending })
     try { return await pending } catch (error) {
-      if (required) throw error
+      if (required) { await reportQQBotAPIError(error); throw error }
       return null
     }
   }
@@ -1193,7 +1246,9 @@ export default class adapterQQBot {
     const source = file?.url || file?.file || file
     if (!source) throw new Error('QQBot 文件上传失败：缺少 file 参数')
 
-    const normalized = await Bot.FormatFile(source)
+    const normalized = isMaterialURL(source)
+      ? await this.materialsAPI.downloadURL(source)
+      : await Bot.FormatFile(source)
     const fileName = name || file?.name || this.getUploadFileName(source)
     const isHttpUrl = typeof normalized === 'string' && /^https?:\/\//.test(normalized)
     if (isHttpUrl) {
@@ -1250,7 +1305,7 @@ export default class adapterQQBot {
     e.self_id = this.id
     e.bot = Bot[this.id]
     e.sendMsg = data.reply
-    e.message = this.normalizeIncomingAttachments(Array.isArray(e.message) ? e.message : [])
+    e.message = normalizeMentions(this.normalizeIncomingAttachments(Array.isArray(e.message) ? e.message : []), e.mentions || [])
     e.qqbot_message = e.message.map(i => ({ ...i }))
     e.raw_message = String(e.raw_message || '').trim()
     this.normalizeIncomingMessage(e, tinyId)
@@ -1434,6 +1489,7 @@ export default class adapterQQBot {
 
   normalizeIncomingMessage(e, tinyId) {
     const message = Array.isArray(e.message) ? e.message : []
+    e.message = message
     const cleanId = id => {
       const text = String(id ?? '').trim().replace(/^qg_/, '')
       const prefix = `${this.id}-`
@@ -1449,7 +1505,8 @@ export default class adapterQQBot {
 
     const isSelfAt = i => {
       if (i?.type !== 'at') return false
-      if (i.is_you || i.is_bot || i.is_self) return true
+      if (isAtAll(i)) return false
+      if (i.is_you || i.is_self) return true
       return [i.qq, i.id, i.user_id, i.tiny_id, i.member_openid, i.user_openid]
         .some(id => selfIds.has(cleanId(id)))
     }
@@ -1458,37 +1515,32 @@ export default class adapterQQBot {
     // QQBot 的 @ 事件本身已表达“调用机器人”。去掉消息数组里的机器人
     // at 段，避免 ICQQ 兼容层把它当作普通目标用户 @；其他用户的 at 保留。
     if (!e.qqbot_at_normalized) {
-      let removedSelfAt = false
       if (Array.isArray(e.message)) {
         e.message = e.message.filter(item => {
           if (item?.type !== 'at') return true
-          const ids = [item.qq, item.id, item.user_id, item.tiny_id, item.member_openid, item.user_openid]
-          const selfMention = isSelfAt(item) || (contentMention && ids.some(id => cleanId(id) === cleanId(contentMention[1])))
-          if (selfMention) removedSelfAt = true
-          return !selfMention
+          return !isSelfAt(item)
         })
       }
-      // GROUP_AT_MESSAGE_CREATE 保证机器人被 @。某些 SDK 版本不会把机器人的
-      // OpenID 放进 at 段，因而用事件语义移除首个 at 段作为兼容回退。
-      if (isGroupAtEvent && !removedSelfAt && Array.isArray(e.message)) {
-        const index = e.message.findIndex(item => item?.type === 'at')
-        if (index >= 0) e.message.splice(index, 1)
-      }
+      // 官方已去掉 @机器人前缀，mentions 中只包含其他成员。
+      // 不能仅因 GROUP_AT_MESSAGE_CREATE 就删除首个 at（可能是全体成员）。
       e.qqbot_at_normalized = true
     }
+    e.atall = e.message.some(isAtAll)
 
-    const text = message
+    const text = e.message
       .filter(i => i?.type === 'text')
       .map(i => i.text || '')
       .join('')
       .trim()
 
-    let msg = text || String(e.msg || e.raw_message || '').trim()
+    const mentionText = e.message.filter(item => item?.type === 'at')
+      .map(item => item.text || `@${atTarget(item) || ''}`).join('')
+    let msg = text || String(e.msg || e.raw_message || '').trim() || mentionText
     const leadingMention = msg.match(/^<@!?([^>]+)>\s*/)
     if (!e.atme && leadingMention) {
       e.atme = isGroupAtEvent || selfIds.has(cleanId(leadingMention[1]))
     }
-    if (e.atme) msg = msg.replace(/^<@!?.+?>\s*/, '').trim()
+    if (leadingMention && selfIds.has(cleanId(leadingMention[1]))) msg = msg.slice(leadingMention[0].length).trim()
     if (msg) e.raw_message = this.normalizeMsgText(msg)
     delete e.msg
   }
@@ -1734,21 +1786,21 @@ export default class adapterQQBot {
         case 'at': {
           // C2C 只有当前会话用户；官方私聊消息不接受 qqbot-at-user 标签。
           if (!e?.group_id) break
-          if ((i.qq || i.id) === 'all') {
+          if (isAtAll(i)) {
             content += '<qqbot-at-everyone />'
           } else {
             let qq
             if (Bot.QQToOpenid) {
-              try { qq = await Bot.QQToOpenid(i.qq || i.id, e) } catch { }
+              try { qq = await Bot.QQToOpenid(atTarget(i), e) } catch { }
             }
-            qq = this.stripQQBotId(qq || i.qq || i.id || '')
+            qq = this.stripQQBotId(qq || atTarget(i) || '')
             content += `<qqbot-at-user id="${qq}" />`
           }
           break
         }
         case 'image': {
           const image = await this.getImage(i?.url || i.file, e)
-          content += `![${i.summary || '图片'} #${image.width || 0}px #${image.height || 0}px](${String(image.file).replace(/_/g, '%5F')})`
+          content += `![${i.summary || '图片'} #${image.width || 0}px #${image.height || 0}px](${this.markdownImageURL(image.file)})`
           break
         }
         case 'button':
@@ -1804,6 +1856,19 @@ export default class adapterQQBot {
   async getImage(file, e) {
     file = await Bot.FormatFile(file)
     const type = 'image'
+    if (isMaterialURL(file)) return { type, file }
+    if (getMessagePolicy(this.config).mode !== 'legacy') {
+      try {
+        const upload = await this.resolveUploadFile(file)
+        const material = await this.materialsAPI.upload(upload)
+        if (material) return { type, file: material.url, width: material.width, height: material.height }
+        // 后续图床路径复用已下载的数据，避免重复下载 URL。
+        file = upload.buffer
+      } catch (error) {
+        if (getQQBotAPIErrorCode(error) === 11253 || error.qqbot_whitelist_denied) throw error
+        logger.warn(`[QQBot] ${this.id} 图片素材上传不可用，使用原图片上传方式（${getQQBotAPIErrorCode(error) || '上传异常'}）`)
+      }
+    }
     try {
       /** 自定义图床 */
       if (Bot?.imageToUrl) {
@@ -1846,6 +1911,11 @@ export default class adapterQQBot {
     const { width, height, url } = await Bot.FileToUrl(file)
     common.mark('Lain-plugin', `使用公网临时服务器：${url}`)
     return { type, file: url, width, height }
+  }
+
+  markdownImageURL (url) {
+    // 素材 token 与机器人绑定，不得修改或转义其中的下划线。
+    return isMaterialURL(url) ? String(url) : String(url).replace(/_/g, '%5F')
   }
 
   /** 处理视频 */
@@ -2095,22 +2165,22 @@ export default class adapterQQBot {
           break
         case 'at':
           if (!e?.group_id) break
-          if ((i.qq || i.id) === 'all') {
+          if (isAtAll(i)) {
             content.push('<qqbot-at-everyone />')
           } else {
             let qq
             if (Bot.QQToOpenid) {
               try {
-                qq = await Bot.QQToOpenid(i.qq || i.id, e)
+                qq = await Bot.QQToOpenid(atTarget(i), e)
               } catch { }
             }
-            qq = this.stripQQBotId(qq || i.qq || i.id || '')
+            qq = this.stripQQBotId(qq || atTarget(i) || '')
             content.push(`<qqbot-at-user id="${qq}" />`)
           }
           break
         case 'image': {
           const image = await this.getImage(i?.url || i.file, e)
-          content.push(`![${i.summary || '图片'} #${image.width || 0}px #${image.height || 0}px](${String(image.file).replace(/_/g, '%5F')})`)
+          content.push(`![${i.summary || '图片'} #${image.width || 0}px #${image.height || 0}px](${this.markdownImageURL(image.file)})`)
           break
         }
         case 'markdown':
@@ -2182,7 +2252,7 @@ export default class adapterQQBot {
   async sendMarkdownReplyMsg(e, data, options = {}) {
     const message = await this.makeMarkdownMessage(e, data, options)
     const ret = await this.sendMsg(e, message)
-    if (!ret.ok) throw new Error(ret.data)
+    if (!ret.ok) throw ret.error || new Error(ret.data)
     return this.returnResult(ret.data)
   }
 
@@ -2248,9 +2318,11 @@ export default class adapterQQBot {
         }
         const nextPayload = { ...payload, content_raw: prepared.message[0].content }
         const response = await this.sdk.request.post(`/v2/users/${encodeURIComponent(userOpenid)}/stream_messages`, nextPayload)
+        if (response?.data?.id) this.imageMaterials?.touch(prepared.message)
         if (payload.input_state === 10) {
           mediaState.resolved.clear()
           mediaState.uploads.clear()
+          mediaState.materials?.clear()
           sentAttachments.clear()
         }
         if (!counted && response?.data?.id) {
@@ -2433,7 +2505,7 @@ export default class adapterQQBot {
         if (resolved.buffer.length > DIRECT_UPLOAD_LIMIT) context.resolved?.delete(file)
       }
       const text = content.map(item => item.type === 'text' ? item.text || '' : item.type === 'at' && targetType === 'group'
-        ? `<@${item.user_id === 'all' ? 'everyone' : item.user_id}>` : '').join('')
+        ? `<@${isAtAll(item) ? 'all' : atTarget(item)}>` : '').join('')
       const payload = { content: text, msg_type: 7, media: { file_info: uploaded.file_info }, msg_seq: nextQQBotMessageSeq() }
       if (context.messageId) payload.msg_id = context.messageId
       else if (context.eventId) payload.event_id = context.eventId
@@ -2441,7 +2513,10 @@ export default class adapterQQBot {
       return data
     }
     const send = targetType === 'group' ? this.sdk.sendGroupMessage.bind(this.sdk) : this.sdk.sendPrivateMessage.bind(this.sdk)
-    const pieces = context.eventId && !context.messageId ? [{ type: 'reply', event_id: context.eventId }, ...content] : content
+    // 旧 SDK 把 at(all) 编码成 <@everyone>，QQ群官方协议使用 <@all>。
+    const normalized = content.filter(item => targetType === 'group' || item.type !== 'at').map(item => item.type === 'at' && targetType === 'group'
+      ? { type: 'text', text: `<@${isAtAll(item) ? 'all' : this.stripQQBotId(atTarget(item))}>` } : item)
+    const pieces = context.eventId && !context.messageId ? [{ type: 'reply', event_id: context.eventId }, ...normalized] : normalized
     return await send(encodeURIComponent(targetId), pieces, context.messageId ? { id: context.messageId } : undefined)
   }
 
@@ -2451,21 +2526,43 @@ export default class adapterQQBot {
     const resolved = state.resolved || new Map()
     const attachments = []
     const attachmentIds = new Set()
+    const materials = state.materials ||= new Map()
+    const useMaterials = getMessagePolicy(this.config).mode !== 'legacy'
     const result = []
     for (const item of message) {
       if (item.type !== 'markdown' || typeof item.content !== 'string') { result.push(item); continue }
-      const pattern = /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)/g
+      const pattern = /!\[[^\]]*\]\(((?:https?:\/\/|qqbot-media:\/\/)[^\s)]+)\)/g
       let content = ''
       let offset = 0
       for (const match of item.content.matchAll(pattern)) {
         const url = match[1]
+        content += item.content.slice(offset, match.index)
+        if (isMaterialURL(url) || materials.has(url)) {
+          content += match[0].replace(url, materials.get(url)?.url || url)
+          offset = match.index + match[0].length
+          continue
+        }
         let media = uploads.get(url)
         let upload = media ? undefined : resolved.get(url)
         if (!media && !upload) {
           upload = await this.resolveUploadFile(url)
           resolved.set(url, upload)
         }
-        content += item.content.slice(offset, match.index)
+        if (!media && useMaterials && upload.buffer.length < IMAGE_MATERIAL_LIMIT) {
+          try {
+            const material = await this.materialsAPI.upload(upload)
+            if (material) {
+              materials.set(url, material)
+              content += match[0].replace(url, material.url)
+              resolved.delete(url)
+              offset = match.index + match[0].length
+              continue
+            }
+          } catch (error) {
+            if (getQQBotAPIErrorCode(error) === 11253 || error.qqbot_whitelist_denied) throw error
+            logger.warn(`[QQBot] ${this.id} Markdown 图片素材上传不可用，使用原上传方式（${getQQBotAPIErrorCode(error) || '上传异常'}）`)
+          }
+        }
         if (!media && upload.buffer.length <= DIRECT_UPLOAD_LIMIT) {
           content += match[0]
         } else {
@@ -2503,6 +2600,7 @@ export default class adapterQQBot {
   }
 
   async recordSuccessfulSend (targetType, targetId, content) {
+    this.imageMaterials?.touch(content)
     const images = content.reduce((total, item) => total + (item.type === 'image' ? 1 :
       item.type === 'markdown' ? (String(item.content || item.params?.flatMap(p => p.values || []).join('\n') || '').match(/!\[[^\]]*\]\(/g) || []).length : 0), 0)
     await this.send_count(targetType === 'group' ? targetId : '', images)
@@ -2547,10 +2645,10 @@ export default class adapterQQBot {
 
     for (const i in Pieces) {
       if (!Pieces[i] || Object.keys(Pieces[i]).length === 0) continue
-      let { ok, data } = await this.sendMsg(e, Pieces[i])
+      let { ok, data, error } = await this.sendMsg(e, Pieces[i])
       if (ok) { res = data; continue }
 
-      throw new Error(data)
+      throw error || new Error(data)
     }
 
     return this.returnResult(res)
@@ -2571,7 +2669,7 @@ export default class adapterQQBot {
     } catch (err) {
       const error = err.message || err
       common.error(e.self_id, error)
-      return { ok: false, data: error }
+      return { ok: false, data: error, error: err }
     }
   }
 
@@ -2797,15 +2895,18 @@ export default class adapterQQBot {
     try {
       if (groupId) {
         QQBotIdMap.applyStoredMapping(data)
-        await Bot.emit('message.group', data)
+        await withQQBotAPIContext(data, async () => {
+          await Bot.emit('message.group', data)
+          await Bot.emit('message', data)
+        })
       } else {
         await QQBotIdMap.handleQQBotPrivateMessage(data, async e => {
-          await Bot.emit('message.private', e)
-          await Bot.emit('message', e)
+          await withQQBotAPIContext(e, async () => {
+            await Bot.emit('message.private', e)
+            await Bot.emit('message', e)
+          })
         })
-        return
       }
-      await Bot.emit('message', data)
     } catch (error) {
       logger.error(`QQBot 按钮命令处理失败：${interactionId} ${error?.stack || error}`)
     }
@@ -3011,10 +3112,10 @@ export default class adapterQQBot {
           break
         case 'at':
           if (!e?.group_id) break
-          if (i.qq === 'all') {
+          if (isAtAll(i)) {
             parts.push('<qqbot-at-everyone />')
           } else {
-            const uid = String(i.qq || i.id || '').replace(this.id + '-', '')
+            const uid = this.stripQQBotId(atTarget(i))
             parts.push('<qqbot-at-user id="' + uid + '" />')
           }
           break

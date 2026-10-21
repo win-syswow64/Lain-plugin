@@ -689,7 +689,9 @@ class QQBotIdMap {
       const qqbotGroup = e.group
       e.group = this.mergeApiObject(e.group, pickedGroup)
       // 消息仍来自 QQBot：这些接口必须保留原始 OpenID 场景，不能被原生 ICQQ 覆盖。
-      for (const method of ['recallMsg', 'muteMember', 'getMsg', 'getChatHistory']) {
+      for (const method of ['recallMsg', 'muteMember', 'getMsg', 'getChatHistory', 'getMemberMap', 'getMemberList',
+        'getMemberInfo', 'getMemberPage', 'pickMember', 'kickMember', 'removeMembers', 'getBlacklist',
+        'getBlacklistPage', 'setMemberBlacklist', 'addToBlacklist', 'removeFromBlacklist']) {
         if (typeof qqbotGroup?.[method] === 'function') e.group[method] = qqbotGroup[method].bind(qqbotGroup)
       }
       e.group_id = groupQQ
@@ -714,7 +716,31 @@ class QQBotIdMap {
         const state = await getGroupState()
         return state.member_role === 'owner'
       }
-      if (this.isMemberListConvertEnabled(qqbotSelfId, groupOpenid)) {
+      const officialGroup = Bot?.[qqbotSelfId]?.pickGroup?.(groupOpenid)
+      if (officialGroup?.getMemberMap) {
+        // 成员查询、踢人与黑名单始终由 QQBot 官方接口执行；身份转换不应路由到 ICQQ 网络。
+        for (const method of ['getMemberMap', 'getMemberList', 'getMemberInfo', 'getMemberPage', 'pickMember',
+          'kickMember', 'removeMembers', 'getBlacklist', 'getBlacklistPage', 'setMemberBlacklist',
+          'addToBlacklist', 'removeFromBlacklist']) {
+          if (typeof officialGroup[method] === 'function') e.group[method] = officialGroup[method].bind(officialGroup)
+        }
+        const officialMember = officialGroup.pickMember(qq || e.member_openid || e.user_openid || e.user_id)
+        if (e.member && officialMember) {
+          for (const method of ['mute', 'kick', 'setBlacklist', 'getAvatarUrl']) {
+            if (typeof officialMember[method] === 'function') e.member[method] = officialMember[method].bind(officialMember)
+          }
+          for (const method of ['renew', 'getInfo']) {
+            if (typeof officialMember[method] !== 'function') continue
+            e.member[method] = async () => {
+              const info = await officialMember[method]()
+              e.member.info = info
+              e.member.is_owner = info.role === 'owner'
+              e.member.is_admin = ['owner', 'admin'].includes(info.role)
+              return info
+            }
+          }
+        }
+      } else if (this.isMemberListConvertEnabled(qqbotSelfId, groupOpenid)) {
         this.attachCachedMemberApis(e.group, {
           self_id: qqbotSelfId,
           group_openid: groupOpenid,
@@ -807,6 +833,10 @@ class QQBotIdMap {
         raw: bot?.adapter || qqbotBot?.adapter
       }
       wrapper.qqbot_bot = qqbotBot || bot?.qqbot_bot || null
+      for (const method of ['pickMember', 'getGroupMemberList', 'getGroupMemberInfo', 'setGroupKick',
+        'getGroupMemberPage', 'removeGroupMembers', 'getGroupBlacklist', 'getGroupBlacklistPage', 'setGroupMemberBlacklist']) {
+        if (typeof qqbotBot?.[method] === 'function') wrapper[method] = qqbotBot[method].bind(qqbotBot)
+      }
       this.fillMinimalBotFields(wrapper, selfId)
       return wrapper
     } catch {
@@ -916,6 +946,14 @@ class QQBotIdMap {
           if (targetGroup) return targetGroup
         }
         return originalPickGroup ? originalPickGroup(groupId) : {}
+      }
+      const originalPickMember = typeof bot.pickMember === 'function' ? bot.pickMember.bind(bot) : null
+      bot.pickMember = (groupId, userId, ...args) => {
+        const route = bot.__qqbotIdMapRoutes?.groups?.get(this.normalizeQQ(groupId))
+        if (route && typeof Bot?.[route.qqbotSelfId]?.pickMember === 'function') {
+          return Bot[route.qqbotSelfId].pickMember(route.groupOpenid, userId)
+        }
+        return originalPickMember ? originalPickMember(groupId, userId, ...args) : {}
       }
       return true
     } catch (error) {
@@ -1047,6 +1085,7 @@ class QQBotIdMap {
     for (const item of e.message) {
       if (item && item.text === undefined) item.text = ''
     }
+    e.atall = e.message.some(item => item?.type === 'at' && [item.qq, item.id, item.user_id, item.data?.qq].includes('all'))
 
     if (this.hasAtSegment(e.message)) {
       const raw = this.buildRawMessageFromSegments(e.message)
@@ -1100,7 +1139,10 @@ class QQBotIdMap {
     if (!Array.isArray(message)) return ''
     return message.map(item => {
       if (!item) return ''
-      if (item.type === 'at') return `@${item.qq || item.id || item.user_id || item.data?.qq || ''}`
+      if (item.type === 'at') {
+        const target = item.qq || item.id || item.user_id || item.data?.qq || ''
+        return target === 'all' ? (item.text || '@全体成员') : `@${target}`
+      }
       if (item.type === 'text') return item.text || item.data?.text || ''
       if (item.type === 'face') return `[${item.text || item.name || item.id || item.data?.id || '表情'}]`
       if (item.type === 'image') return '[图片]'
@@ -1155,7 +1197,7 @@ class QQBotIdMap {
     while ((match = regex.exec(text))) {
       if (match.index > lastIndex) ret.push({ type: 'text', text: text.slice(lastIndex, match.index) })
       const openid = this.normalizeOpenid(match[1], selfId)
-      const qq = this.normalizeQQ(mentions[openid])
+      const qq = match[1] === 'all' ? 'all' : this.normalizeQQ(mentions[openid])
       ret.push(qq ? { type: 'at', qq } : { type: 'text', text: match[0] })
       lastIndex = regex.lastIndex
     }
@@ -1171,7 +1213,8 @@ class QQBotIdMap {
   }
 
   static normalizeAtSegment (item, qq = item?.qq) {
-    qq = this.normalizeQQ(qq || item?.id || item?.user_id || item?.data?.qq || item?.data?.id || item?.data?.user_id)
+    const target = qq || item?.id || item?.user_id || item?.data?.qq || item?.data?.id || item?.data?.user_id
+    qq = target === 'all' ? 'all' : this.normalizeQQ(target)
     if (!qq) return item
     return {
       ...item,

@@ -51,7 +51,7 @@ export function withMicroKeyboard (message, enabled) {
 
 function legacyMarkdown (content, isGroup) {
   const parts = []
-  const pattern = /!\[[^\]]*\]\((https?:\/\/[^\s)]+)\)|<qqbot-at-user\s+id=["']([^"']+)["']\s*\/>|<qqbot-at-everyone\s*\/>/gi
+  const pattern = /!\[[^\]]*\]\(((?:https?:\/\/|qqbot-media:\/\/)[^\s)]+)\)|<qqbot-at-user\s+id=["']([^"']+)["']\s*\/>|<qqbot-at-everyone\s*\/>/gi
   let offset = 0
   const text = value => {
     const plain = value.replace(/<qqbot-at-(?:user|everyone)\b[^>]*\/>/gi, '')
