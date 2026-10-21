@@ -17,6 +17,7 @@ import C2CStream from './C2CStream.js'
 import QQBotIdMap from '../../model/qqbot-id-map.js'
 import { installQQBotAPIPolicy, normalizeRestrictedAPIError, withQQBotAPIContext, reportQQBotAPIError, getQQBotAPIErrorCode } from './APIPolicy.js'
 import ImageMaterials, { IMAGE_MATERIAL_LIMIT, isMaterialURL } from './ImageMaterials.js'
+import { convertImageToWebP, withImageScope, createImageScope, clearImageScope } from './ImageConversion.js'
 import GroupMembers from './GroupMembers.js'
 import { atTarget, isAtAll, normalizeMentions } from './Mentions.js'
 import { getMessagePolicy, getMessageVariants, getSmallSetting, withMicroKeyboard } from './MessagePolicy.js'
@@ -1096,9 +1097,10 @@ export default class adapterQQBot {
   /** QQ 富媒体文件：上传后通过 msg_type=7 发送 file_info。 */
   async uploadRichFile (targetType, targetId, file, name, fileType = 4, resolved) {
     if (!['group', 'user'].includes(targetType)) throw new Error('QQBot 上传失败：未知会话类型')
-    const upload = { ...(resolved || await this.resolveUploadFile(file, name)) }
+    let upload = { ...(resolved || await this.resolveUploadFile(file, name)) }
     if (!Buffer.isBuffer(upload.buffer)) throw new Error('QQBot 上传失败：无法核实文件大小')
     const requestedType = Number(fileType)
+    if (requestedType === 1) upload = await convertImageToWebP(upload)
     upload.file_type = getUploadFileType(requestedType, upload.buffer.length)
     if (upload.name === 'file' && requestedType !== 4) {
       upload.name = { 1: 'image.png', 2: 'video.mp4', 3: 'audio.silk' }[requestedType]
@@ -1245,6 +1247,10 @@ export default class adapterQQBot {
   async resolveUploadFile (file, name) {
     const source = file?.url || file?.file || file
     if (!source) throw new Error('QQBot 文件上传失败：缺少 file 参数')
+    if (isMaterialURL(source)) {
+      const memory = this.materialsAPI.source(source)
+      if (memory) return { ...memory, name: name || memory.name }
+    }
 
     const normalized = isMaterialURL(source)
       ? await this.materialsAPI.downloadURL(source)
@@ -1857,13 +1863,12 @@ export default class adapterQQBot {
     file = await Bot.FormatFile(file)
     const type = 'image'
     if (isMaterialURL(file)) return { type, file }
+    const upload = await convertImageToWebP(await this.resolveUploadFile(file))
+    file = upload.buffer
     if (getMessagePolicy(this.config).mode !== 'legacy') {
       try {
-        const upload = await this.resolveUploadFile(file)
         const material = await this.materialsAPI.upload(upload)
         if (material) return { type, file: material.url, width: material.width, height: material.height }
-        // 后续图床路径复用已下载的数据，避免重复下载 URL。
-        file = upload.buffer
       } catch (error) {
         if (getQQBotAPIErrorCode(error) === 11253 || error.qqbot_whitelist_denied) throw error
         logger.warn(`[QQBot] ${this.id} 图片素材上传不可用，使用原图片上传方式（${getQQBotAPIErrorCode(error) || '上传异常'}）`)
@@ -2250,6 +2255,10 @@ export default class adapterQQBot {
   }
 
   async sendMarkdownReplyMsg(e, data, options = {}) {
+    return await withImageScope(() => this.sendMarkdownReplyWithImages(e, data, options))
+  }
+
+  async sendMarkdownReplyWithImages(e, data, options = {}) {
     const message = await this.makeMarkdownMessage(e, data, options)
     const ret = await this.sendMsg(e, message)
     if (!ret.ok) throw ret.error || new Error(ret.data)
@@ -2300,15 +2309,23 @@ export default class adapterQQBot {
     if (!sourceMessageId) throw new Error('QQBot C2C 流式消息需要入站消息 ID')
 
     let counted = false
-    const mediaState = { uploads: new Map(), resolved: new Map() }
+    const mediaState = { uploads: new Map(), resolved: new Map(), imageScope: createImageScope() }
     const sentAttachments = new Set()
+    const cleanup = () => {
+      mediaState.resolved.clear()
+      mediaState.uploads.clear()
+      mediaState.materials?.clear()
+      clearImageScope(mediaState.imageScope)
+      sentAttachments.clear()
+    }
     return new C2CStream({
       msgId: sourceMessageId,
       // stream_messages 的 event_id 锚定入站消息；腾讯当前 SDK 默认同 msg_id。
       eventId: sourceMessageId,
       throttleMs,
       logger,
-      send: async payload => {
+      onClose: cleanup,
+      send: async payload => await withImageScope(async () => {
         const prepared = await this.prepareMarkdownUploads('user', userOpenid, [{ type: 'markdown', content: payload.content_raw }], mediaState)
         for (const attachment of prepared.attachments) {
           if (!sentAttachments.has(attachment.file_info)) {
@@ -2316,21 +2333,17 @@ export default class adapterQQBot {
             sentAttachments.add(attachment.file_info)
           }
         }
-        const nextPayload = { ...payload, content_raw: prepared.message[0].content }
-        const response = await this.sdk.request.post(`/v2/users/${encodeURIComponent(userOpenid)}/stream_messages`, nextPayload)
-        if (response?.data?.id) this.imageMaterials?.touch(prepared.message)
-        if (payload.input_state === 10) {
-          mediaState.resolved.clear()
-          mediaState.uploads.clear()
-          mediaState.materials?.clear()
-          sentAttachments.clear()
-        }
+        const send = pieces => this.sdk.request.post(`/v2/users/${encodeURIComponent(userOpenid)}/stream_messages`, { ...payload, content_raw: pieces[0].content })
+        const result = this.imageMaterials ? await this.imageMaterials.send(prepared.message, send)
+          : { response: await send(prepared.message), message: prepared.message }
+        const { response } = result
+        if (response?.data?.id) this.imageMaterials?.touch(result.message)
         if (!counted && response?.data?.id) {
           counted = true
-          await this.recordSuccessfulSend('user', userOpenid, [{ type: 'markdown', content: nextPayload.content_raw }])
+          await this.recordSuccessfulSend('user', userOpenid, result.message)
         }
         return response
-      }
+      }, mediaState.imageScope)
     })
   }
 
@@ -2360,6 +2373,10 @@ export default class adapterQQBot {
 
   /** 发送私聊消息；未传入 source 时按主动消息发送，有上下文时使用被动回复字段。 */
   async sendFriendMsg(userId, data, source = {}) {
+    return await withImageScope(() => this.sendFriendMsgWithImages(userId, data, source))
+  }
+
+  async sendFriendMsgWithImages(userId, data, source = {}) {
     userId = await this.resolveOpenid(userId, 'private')
     /** 构建一个普通e给按钮用 */
     let e = {
@@ -2387,6 +2404,10 @@ export default class adapterQQBot {
    * 不携带 msg_id/event_id；群主须开启机器人主动发言权限。
    */
   async sendGroupMsg(groupID, data, source = {}) {
+    return await withImageScope(() => this.sendGroupMsgWithImages(groupID, data, source))
+  }
+
+  async sendGroupMsgWithImages(groupID, data, source = {}) {
     const context = typeof source === 'string' ? { messageId: source } : (source || {})
     let state
     if (!context.messageId && !context.msgId && !context.id && !context.eventId) {
@@ -2443,6 +2464,10 @@ export default class adapterQQBot {
 
   /** Render a rejected message in another format without resending successful pieces. */
   async sendQQBotContent (targetType, targetId, content, context = {}) {
+    return await withImageScope(() => this.sendQQBotContentWithImages(targetType, targetId, content, context))
+  }
+
+  async sendQQBotContentWithImages (targetType, targetId, content, context = {}) {
     const prepared = await this.prepareMarkdownUploads(targetType, targetId, content)
     content = prepared.message
     context = { ...context, uploads: prepared.uploads, resolved: prepared.resolved }
@@ -2473,6 +2498,7 @@ export default class adapterQQBot {
             break
           } catch (error) {
             lastError = error
+            if (error.qqbot_material_final || error.qqbot_whitelist_denied) throw error
             // Do not retry a timeout: the platform may already have accepted the message.
             if (!error.response && /timeout|timed out|ECONNRESET|ETIMEDOUT/i.test(error.message || '')) throw error
           }
@@ -2492,6 +2518,15 @@ export default class adapterQQBot {
   }
 
   async sendQQBotContentOnce (targetType, targetId, content, context) {
+    const hasReferences = content.some(item => String(item.content || item.file || item.url || item.params?.flatMap(p => p.values || []).join('') || '').includes('qqbot-media://'))
+    const materials = this.imageMaterials || (hasReferences ? this.materialsAPI : null)
+    if (!materials) return await this.sendQQBotContentRequest(targetType, targetId, content, context)
+    const result = await materials.send(content, pieces => this.sendQQBotContentRequest(targetType, targetId, pieces, context))
+    content.splice(0, content.length, ...result.message)
+    return result.response
+  }
+
+  async sendQQBotContentRequest (targetType, targetId, content, context) {
     const media = content.find(item => ['image', 'audio', 'video'].includes(item.type))
     if (media && !content.some(item => ['markdown', 'keyboard'].includes(item.type))) {
       const endpoint = `/v2/${targetType}s/${encodeURIComponent(targetId)}`
@@ -2546,7 +2581,15 @@ export default class adapterQQBot {
         let upload = media ? undefined : resolved.get(url)
         if (!media && !upload) {
           upload = await this.resolveUploadFile(url)
+        }
+        if (upload) {
+          upload = await convertImageToWebP(upload)
           resolved.set(url, upload)
+        }
+        if (!useMaterials) {
+          content += match[0]
+          offset = match.index + match[0].length
+          continue
         }
         if (!media && useMaterials && upload.buffer.length < IMAGE_MATERIAL_LIMIT) {
           try {
@@ -2563,21 +2606,17 @@ export default class adapterQQBot {
             logger.warn(`[QQBot] ${this.id} Markdown 图片素材上传不可用，使用原上传方式（${getQQBotAPIErrorCode(error) || '上传异常'}）`)
           }
         }
-        if (!media && upload.buffer.length <= DIRECT_UPLOAD_LIMIT) {
-          content += match[0]
+        if (!media) {
+          media = await this.uploadRichFile(targetType, targetId, url, undefined, 1, upload)
+          uploads.set(url, media)
+          if (media.raw_url) uploads.set(media.raw_url, media)
+          resolved.delete(url)
+        }
+        if (media.file_type === 1 && /^https?:\/\//.test(media.raw_url || '')) {
+          content += match[0].replace(url, media.raw_url)
         } else {
-          if (!media) {
-            media = await this.uploadRichFile(targetType, targetId, url, undefined, 1, upload)
-            uploads.set(url, media)
-            if (media.raw_url) uploads.set(media.raw_url, media)
-            resolved.delete(url)
-          }
-          if (media.file_type === 1 && /^https?:\/\//.test(media.raw_url || '')) {
-            content += match[0].replace(url, media.raw_url)
-          } else {
-            if (!attachmentIds.has(media.file_info)) { attachments.push(media); attachmentIds.add(media.file_info) }
-            content += '[图片已作为附件发送]'
-          }
+          if (!attachmentIds.has(media.file_info)) { attachments.push(media); attachmentIds.add(media.file_info) }
+          content += '[图片已作为附件发送]'
         }
         offset = match.index + match[0].length
       }
@@ -2639,6 +2678,10 @@ export default class adapterQQBot {
 
   /** 快速回复 */
   async sendReplyMsg(e, msg) {
+    return await withImageScope(() => this.sendReplyWithImages(e, msg))
+  }
+
+  async sendReplyWithImages(e, msg) {
     if (typeof msg === 'string' && msg.includes('歌曲分享失败：')) return false
     let res
     const { Pieces } = await this.getQQBot(msg, e)
@@ -2882,13 +2925,13 @@ export default class adapterQQBot {
 
     data.sendMsg = data.reply
     // 回调也可能执行调用 e.markdown() 的插件；沿用互动 ID 的被动回复上下文。
-    data.markdown = async (content, options = {}) => {
+    data.markdown = async (content, options = {}) => await withImageScope(async () => {
       if (!options.buttons && !options.button) {
         const buttons = await this.button(data)
         if (buttons?.length) options = { ...options, buttons }
       }
       return data.reply(await this.makeMarkdownMessage(data, content, options))
-    }
+    })
     data.replyMarkdown = data.markdown
     data.sendMarkdown = data.markdown
 

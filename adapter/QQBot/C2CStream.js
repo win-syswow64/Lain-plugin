@@ -1,6 +1,6 @@
 /** QQBot 官方 C2C stream_messages 会话。每次 update 传入完整内容快照。 */
 export default class C2CStream {
-  constructor ({ send, msgId, eventId, throttleMs = 500, logger = null }) {
+  constructor ({ send, msgId, eventId, throttleMs = 500, logger = null, onClose = null }) {
     if (typeof send !== 'function') throw new TypeError('C2C stream 缺少发送函数')
     if (!msgId) throw new Error('C2C stream 需要入站消息 ID')
 
@@ -18,6 +18,7 @@ export default class C2CStream {
     this.timer = null
     this.flushPromise = null
     this.completed = false
+    this.onClose = onClose
   }
 
   /** 用完整 Markdown 快照替换当前流内容；中间更新按间隔合并。 */
@@ -44,8 +45,10 @@ export default class C2CStream {
     clearTimeout(this.timer)
     this.timer = null
 
-    if (this.flushPromise) await this.flushPromise.catch(() => {})
-    return this.flush(10)
+    try {
+      if (this.flushPromise) await this.flushPromise
+      return await this.flush(10)
+    } finally { this.cleanup() }
   }
 
   /** 取消尚未发送的节流更新。已创建的 QQ 流需要 complete() 才能正常收尾。 */
@@ -53,6 +56,14 @@ export default class C2CStream {
     this.completed = true
     clearTimeout(this.timer)
     this.timer = null
+    if (this.flushPromise) this.flushPromise.then(() => this.cleanup(), () => this.cleanup())
+    else this.cleanup()
+  }
+
+  cleanup () {
+    const close = this.onClose
+    this.onClose = null
+    close?.()
   }
 
   async flush (inputState) {
@@ -82,6 +93,12 @@ export default class C2CStream {
     this.flushPromise = request
     try {
       return await request
+    } catch (error) {
+      this.completed = true
+      clearTimeout(this.timer)
+      this.timer = null
+      this.cleanup()
+      throw error
     } finally {
       this.flushPromise = null
       if (!this.completed && this.pendingText !== this.lastSentText && !this.timer) {
