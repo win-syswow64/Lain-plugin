@@ -1,3 +1,8 @@
+/** Missing settings preserve the default official image material service. */
+export function isQQImageHostEnabled (config = {}) {
+  return ![false, 0, 'false', 'off', '0', '关', '关闭'].includes(config.qqImageHost)
+}
+
 /** Per-account message mode, also accepts the reference plugin's string configuration. */
 export function getMessagePolicy (config = {}) {
   const value = config.markdown ?? 'raw'

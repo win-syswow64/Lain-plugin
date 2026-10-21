@@ -17,10 +17,10 @@ import C2CStream from './C2CStream.js'
 import QQBotIdMap from '../../model/qqbot-id-map.js'
 import { installQQBotAPIPolicy, normalizeRestrictedAPIError, withQQBotAPIContext, reportQQBotAPIError, getQQBotAPIErrorCode } from './APIPolicy.js'
 import ImageMaterials, { IMAGE_MATERIAL_LIMIT, isMaterialURL } from './ImageMaterials.js'
-import { convertImageToWebP, withImageScope, createImageScope, clearImageScope } from './ImageConversion.js'
+import { convertImageToWebP, withImageScope, createImageScope, clearImageScope, getImageScope } from './ImageConversion.js'
 import GroupMembers from './GroupMembers.js'
 import { atTarget, isAtAll, normalizeMentions } from './Mentions.js'
-import { getMessagePolicy, getMessageVariants, getSmallSetting, withMicroKeyboard } from './MessagePolicy.js'
+import { getMessagePolicy, getMessageVariants, getSmallSetting, withMicroKeyboard, isQQImageHostEnabled } from './MessagePolicy.js'
 import { recordQQBotCount, readQQBotCount } from '../../model/qqbot-dau.js'
 import { DIRECT_UPLOAD_LIMIT, HARD_UPLOAD_LIMIT, getUploadFileType, downloadUploadFile } from './UploadPolicy.js'
 
@@ -1858,6 +1858,18 @@ export default class adapterQQBot {
     return { Pieces, reply, normalMsg }
   }
 
+  /** Read the live account config so manual YAML edits also take effect. */
+  get qqImageHostEnabled () {
+    return isQQImageHostEnabled(Bot?.[this.id]?.config || this.config)
+  }
+
+  rememberHostedImage (image) {
+    const hosted = getImageScope()?.hosted
+    hosted?.add(`${this.id}:${image.file}`)
+    hosted?.add(`${this.id}:${this.markdownImageURL(image.file)}`)
+    return image
+  }
+
   /** 处理图片 */
   async getImage(file, e) {
     file = await Bot.FormatFile(file)
@@ -1865,7 +1877,7 @@ export default class adapterQQBot {
     if (isMaterialURL(file)) return { type, file }
     const upload = await convertImageToWebP(await this.resolveUploadFile(file))
     file = upload.buffer
-    if (getMessagePolicy(this.config).mode !== 'legacy') {
+    if (this.qqImageHostEnabled && getMessagePolicy(this.config).mode !== 'legacy') {
       try {
         const material = await this.materialsAPI.upload(upload)
         if (material) return { type, file: material.url, width: material.width, height: material.height }
@@ -1879,20 +1891,20 @@ export default class adapterQQBot {
       if (Bot?.imageToUrl) {
         const { width, height, url } = await Bot.imageToUrl(file)
         common.mark('Lain-plugin', `使用自定义图床发送图片：${url}`)
-        return { type, file: url, width, height }
+        return this.rememberHostedImage({ type, file: url, width, height })
       } else if (Bot?.uploadFile) {
         /** 老接口，后续废除 */
         const url = await Bot.uploadFile(file)
         common.mark('Lain-plugin', `使用自定义图床发送图片：${url}`)
         const { width, height } = sizeOf(await Bot.Buffer(file))
         console.warn('[Bot.uploadFile]接口即将废除，请查看文档更换新接口！')
-        return { type, file: url, width, height }
+        return this.rememberHostedImage({ type, file: url, width, height })
       }
       /** ICQQ */
       if (Cfg.ICQQ && lain?.file?.uploadImage) {
         const { url, width, height } = await lain.file.uploadImage(file)
         common.mark('Lain-plugin', `使用ICQQ发送图片：${url}`)
-        return { type, file: url, width, height }
+        return this.rememberHostedImage({ type, file: url, width, height })
       }
     } catch (error) {
       logger.error('[调用错误][自定义图床] 将继续公网发送图片')
@@ -1905,7 +1917,7 @@ export default class adapterQQBot {
       if (QQ) {
         const { width, height, url } = await Bot.uploadQQ(file, QQ)
         common.mark('Lain-plugin', `QQ图床上传成功：${url}`)
-        return { type, file: url, width, height }
+        return this.rememberHostedImage({ type, file: url, width, height })
       }
     } catch (error) {
       logger.error('[调用错误][QQ图床] 将继续公网发送图片')
@@ -1915,7 +1927,7 @@ export default class adapterQQBot {
     /** 公网 */
     const { width, height, url } = await Bot.FileToUrl(file)
     common.mark('Lain-plugin', `使用公网临时服务器：${url}`)
-    return { type, file: url, width, height }
+    return this.rememberHostedImage({ type, file: url, width, height })
   }
 
   markdownImageURL (url) {
@@ -2562,7 +2574,8 @@ export default class adapterQQBot {
     const attachments = []
     const attachmentIds = new Set()
     const materials = state.materials ||= new Map()
-    const useMaterials = getMessagePolicy(this.config).mode !== 'legacy'
+    const useMarkdown = getMessagePolicy(this.config).mode !== 'legacy'
+    const useMaterials = useMarkdown && this.qqImageHostEnabled
     const result = []
     for (const item of message) {
       if (item.type !== 'markdown' || typeof item.content !== 'string') { result.push(item); continue }
@@ -2572,7 +2585,8 @@ export default class adapterQQBot {
       for (const match of item.content.matchAll(pattern)) {
         const url = match[1]
         content += item.content.slice(offset, match.index)
-        if (isMaterialURL(url) || materials.has(url)) {
+        const cachedImage = materials.get(url)
+        if (isMaterialURL(url) || (cachedImage && (useMaterials || !isMaterialURL(cachedImage.url)))) {
           content += match[0].replace(url, materials.get(url)?.url || url)
           offset = match.index + match[0].length
           continue
@@ -2586,8 +2600,20 @@ export default class adapterQQBot {
           upload = await convertImageToWebP(upload)
           resolved.set(url, upload)
         }
-        if (!useMaterials) {
+        if (!useMarkdown) {
           content += match[0]
+          offset = match.index + match[0].length
+          continue
+        }
+        if (!useMaterials && !media && upload.buffer.length <= DIRECT_UPLOAD_LIMIT) {
+          // Do not send custom-host URLs back through the official material API.
+          // Explicit Markdown URLs still pass through the default WebP conversion.
+          const image = getImageScope()?.hosted.has(`${this.id}:${url}`)
+            ? { file: url } : await this.getImage(upload.buffer)
+          const hostedURL = this.markdownImageURL(image.file)
+          materials.set(url, { url: hostedURL })
+          resolved.set(hostedURL, upload)
+          content += match[0].replace(url, hostedURL)
           offset = match.index + match[0].length
           continue
         }

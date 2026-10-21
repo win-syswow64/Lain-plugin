@@ -170,6 +170,7 @@ export default class ImageMaterials {
   }
 
   async upload (source) {
+    if (this.adapter.qqImageHostEnabled === false) return null
     const upload = await convertImageToWebP(source)
     if (upload.buffer.length >= IMAGE_MATERIAL_LIMIT) return null
     const md5 = crypto.createHash('md5').update(upload.buffer).digest('hex')
@@ -178,9 +179,11 @@ export default class ImageMaterials {
     if (failed) throw failed
     if (this.pending.has(md5)) {
       const result = await this.pending.get(md5)
+      if (result.disabled) return null
       return this.remember(result.entry, result.upload)
     }
     const task = this.queue.then(async () => {
+      if (this.adapter.qqImageHostEnabled === false) return { disabled: true }
       this.pruneExpired()
       const cached = this.entries.get(md5)
       if (cached?.expires_at > Date.now() + 60000) return { entry: cached, upload }
@@ -192,6 +195,7 @@ export default class ImageMaterials {
     this.queue = task.then(() => undefined, () => undefined)
     try {
       const result = await task
+      if (result.disabled) return null
       return this.remember(result.entry, result.upload)
     } catch (error) {
       const wrapped = materialError(error)
@@ -256,6 +260,7 @@ export default class ImageMaterials {
   }
 
   async repair (message, error) {
+    if (this.adapter.qqImageHostEnabled === false) throw materialError(error, '官方图床已关闭，无法重建失效素材，请重新发送原图')
     const urls = this.references(message)
     const sources = urls.map(url => ({ url, upload: this.source(url), entry: this.find(url) }))
     const code = getQQBotAPIErrorCode(error)

@@ -4,13 +4,14 @@ import sharp from 'sharp'
 
 const scopes = new AsyncLocalStorage()
 
-export const createImageScope = () => ({ sources: new Map(), replacements: new Map(), failures: new Map() })
+export const createImageScope = () => ({ sources: new Map(), replacements: new Map(), failures: new Map(), hosted: new Set() })
 export const getImageScope = () => scopes.getStore()
 
 export function clearImageScope (scope) {
   scope?.sources.clear()
   scope?.replacements.clear()
   scope?.failures.clear()
+  scope?.hosted.clear()
 }
 
 /** 普通回复在 finally 释放临时图片；流式会话由完成/取消入口显式释放。 */

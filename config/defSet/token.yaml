@@ -15,6 +15,7 @@ default:
       templateId: ""                     # 模板模式或 raw 失败后降级的模板 ID
       params: []                         # 模板参数名，按正文各行填充，最后一个参数接收剩余正文
     smallbtn: false                       # 原生小按钮；也可单条消息使用 segment.custom('small')
+    qqImageHost: true                     # 官方 Markdown 图片素材图床；false 使用现有自定义/公网图床
     other:                                # 其他配置
       Prefix: true                        # QQ频道、QQ群Bot前缀转换 [/] => [#]   true-开启  false-关闭
       QQCloud:                            # QQ群Bot => QQ图床，填写QQ号。需使用QQ发送图片

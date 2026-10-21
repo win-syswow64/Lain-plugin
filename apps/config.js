@@ -12,6 +12,11 @@ export class adapter extends plugin {
       priority: 1,
       rule: [
         {
+          reg: /^#QQ图床(开|关)(?:\s*[:：]?\s*\d+)?\s*$/i,
+          fnc: 'imageHost',
+          permission: 'master'
+        },
+        {
           reg: /^#QQ(群|Bot|频道)设置(QQ图床|前缀|斜杠转#|斜杠转换|\/转#|\/转换为?#?|防倒卖(群号)?).+/i,
           fnc: 'other',
           permission: 'master'
@@ -47,6 +52,7 @@ export class adapter extends plugin {
       removeAt: false,
       secret: '',
       toCallback: true,
+      qqImageHost: true,
       other: {
         Prefix: true,
         QQ: '',
@@ -194,6 +200,29 @@ export class adapter extends plugin {
     }
     const policy = typeof account.markdown === 'object' ? account.markdown : { mode: account.markdown || 'raw' }
     return await this.reply(`QQBot ${accountId}：模式 ${policy.mode}，小按钮 ${account.smallbtn ? '开启' : '关闭'}，配置已生效。`)
+  }
+
+  /** Official image materials are configured independently for each QQBot account. */
+  async imageHost () {
+    const match = String(this.e.msg || '').trim().match(/^#QQ图床(开|关)(?:\s*[:：]?\s*(\d+))?$/i)
+    if (!match) return false
+    const cfg = new YAML(lain._pathCfg + '/token.yaml')
+    const accounts = cfg.get('token') || {}
+    const ids = Object.keys(accounts).filter(id => ![1, 3].includes(Number(accounts[id]?.model)))
+    const current = this.getQQBotConfigSelfId(this.e).replace(/^qg_/, '')
+    const requested = match[2] || current || String(this.e.self_id || '')
+    const bound = ids.filter(id => String(QQBotIdMap.getBoundBotQQ(id)) === requested)
+    let accountId = ids.includes(requested) ? requested : bound.length === 1 ? bound[0] : undefined
+    if (!accountId && !match[2] && !current && ids.length === 1) accountId = ids[0]
+    if (!accountId) return await this.reply('未找到唯一的 QQBot 账号，请指定 AppID 或已绑定的机器人 QQ 号，例如：#QQ图床开 102089931')
+    const enabled = match[1] === '开'
+    accounts[accountId].qqImageHost = enabled
+    cfg.set('token', accounts)
+    for (const botId of [accountId, `qg_${accountId}`]) {
+      if (Bot?.[botId]?.config) Bot[botId].config.qqImageHost = enabled
+      if (Bot?.[botId]?.sdk?.config) Bot[botId].sdk.config.qqImageHost = enabled
+    }
+    return await this.reply(`QQBot ${accountId}：官方图床已${enabled ? '开启' : '关闭'}，配置已保存并生效。`)
   }
 
   /** 旧版模板模式已废弃 */
