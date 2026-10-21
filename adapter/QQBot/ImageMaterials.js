@@ -8,6 +8,7 @@ import { fileTypeFromBuffer } from 'file-type'
 import { getQQBotAPIErrorCode } from './APIPolicy.js'
 
 export const IMAGE_MATERIAL_LIMIT = 10 * 1024 * 1024
+const MATERIAL_CACHE_LIMIT = 80
 export const isMaterialURL = value => /^qqbot-media:\/\/image\/v1\/[^\s)]+$/.test(String(value || ''))
 const formats = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }
 
@@ -57,8 +58,9 @@ export default class ImageMaterials {
         return { ...cached, width: metadata.width, height: metadata.pageHeight || metadata.height }
       }
       if (cached) await this.remove(cached)
-      // 留出配额给其他功能；并发上传通过队列串行管理，避免越过数量上限。
-      if (this.entries.size >= 90) await this.evictOldest()
+      // 最多缓存 80 张自有素材；兼容旧缓存超额的情况，按上传顺序释放配额。
+      // 并发上传通过队列串行管理，复用已有图片不会触发删除。
+      while (this.entries.size >= MATERIAL_CACHE_LIMIT) await this.evictOldest()
       const fileName = `${md5}.${extension}`
       const prepare = () => this.adapter.sdk.request.post('/v2/media-images/prepare', {
         file_name: fileName,
@@ -105,6 +107,7 @@ export default class ImageMaterials {
         url: data.url,
         file_name: fileName,
         ttl: Number(data.ttl) || 7776000,
+        created_at: Date.now(),
         expires_at: Date.now() + (Number(data.ttl) || 7776000) * 1000,
         last_used_at: Date.now()
       }
@@ -130,7 +133,8 @@ export default class ImageMaterials {
   }
 
   async evictOldest () {
-    const oldest = [...this.entries.values()].sort((a, b) => a.last_used_at - b.last_used_at)[0]
+    // Map 和磁盘缓存均按上传顺序保存；引用或命中缓存不会改变先后顺序。
+    const oldest = this.entries.values().next().value
     if (oldest) await this.remove(oldest)
   }
 
