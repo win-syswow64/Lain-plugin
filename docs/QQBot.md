@@ -455,6 +455,8 @@ Lain-plugin 不再跟踪 `ws-plugin/` 和 `22009-plugin/` 目录，保留已有�
 - `e.reply()`、`e.markdown()`、群/私聊主动发送共用该分流。Markdown `![说明](URL)` 指向动图时，另发富媒体图片并保留正文提示；即使平台返回 `raw_url` 也不再内嵌回 Markdown。私聊 Markdown 流同样处理，避免每次更新重复发送同一图片。
 - 一次回复同时含文字、按钮、静态图与文件时，富媒体分别发送，正文和按钮保留在 Markdown 消息中，各片段保留原有回复上下文。legacy 模式仍全部使用普通文本/富媒体。
 
+富媒体的消息正文不会自动填入上传文件名，图片下方不再额外显示类似 `1792657980361.gif` 的文件名；普通文件卡片仍由 QQ 展示其文件名。只有动图、视频、语音或文件的回复不会自动附加按钮；显式按钮和静态 Markdown 图片的自动按钮保持可用。
+
 ```js
 // 静态图片使用 Markdown（raw / template 模式）。
 await e.reply(segment.image('/path/to/panel.png'))

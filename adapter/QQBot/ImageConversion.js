@@ -4,7 +4,8 @@ import sharp from 'sharp'
 
 const scopes = new AsyncLocalStorage()
 
-export const createImageScope = () => ({ sources: new Map(), replacements: new Map(), failures: new Map(), hosted: new Set() })
+export const createImageScope = () => ({ sources: new Map(), replacements: new Map(), failures: new Map(), hosted: new Set(),
+  images: new Map(), autoButtons: new Map() })
 export const getImageScope = () => scopes.getStore()
 
 export function clearImageScope (scope) {
@@ -12,6 +13,8 @@ export function clearImageScope (scope) {
   scope?.replacements.clear()
   scope?.failures.clear()
   scope?.hosted.clear()
+  scope?.images.clear()
+  scope?.autoButtons.clear()
 }
 
 /** 普通回复在 finally 释放临时图片；流式会话由完成/取消入口显式释放。 */

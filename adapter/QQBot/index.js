@@ -1229,7 +1229,6 @@ export default class adapterQQBot {
   async sendRichFile (targetType, targetId, file, name, source = {}, fileType = 4) {
     const uploaded = await this.uploadRichFile(targetType, targetId, file, name, fileType)
     const payload = {
-      content: uploaded.name || '文件',
       msg_type: 7,
       media: { file_info: uploaded.file_info },
       msg_seq: nextQQBotMessageSeq()
@@ -1369,11 +1368,11 @@ export default class adapterQQBot {
 
     /** 获取匹配的按钮行（供自动附加） */
     const getAutoButtons = async () => {
-      try { return await this.button(e) } catch { return false }
+      try { return await this.getReplyAutoButtons(e) } catch { return false }
     }
 
     /** 构建快速回复消息（自动附加按钮插件） */
-    e.reply = async (msg, quote) => {
+    e.reply = async (msg, quote) => await withImageScope(async () => {
       if (quote?.markdown) return await e.markdown(msg, quote)
       // 此回复函数始终由 QQBot 创建。身份转译可能改写 e.adapter，
       // 但按钮仍需通过原始 QQBot 通道发送。
@@ -1381,7 +1380,7 @@ export default class adapterQQBot {
         item?.type === 'keyboard' || item?.type === 'button' || QQBotButton.isButton(item)
       )
       const isProfilePanel = /^#面板(?:\s*\d{9,10})?$/.test(String(e.msg || ''))
-      if (!hasExplicitButtons || isProfilePanel) {
+      if ((!hasExplicitButtons || isProfilePanel) && await this.hasAutoButtonContent(msg)) {
         const btnRows = await getAutoButtons()
         if (btnRows?.length) {
           const content = isProfilePanel
@@ -1391,14 +1390,14 @@ export default class adapterQQBot {
         }
       }
       return await this.sendReplyMsg(e, msg, quote)
-    }
-    e.markdown = async (msg, options = {}) => {
-      if (!options.buttons && !options.button) {
+    })
+    e.markdown = async (msg, options = {}) => await withImageScope(async () => {
+      if (!options.buttons && !options.button && await this.hasAutoButtonContent(msg)) {
         const btnRows = await getAutoButtons()
-        if (btnRows?.length) options.buttons = btnRows
+        if (btnRows?.length) options = { ...options, buttons: btnRows }
       }
       return await this.sendMarkdownReplyMsg(e, msg, options)
-    }
+    })
     e.replyMarkdown = e.markdown
     e.sendMarkdown = e.markdown
     /** 快速撤回 */
@@ -1857,12 +1856,65 @@ export default class adapterQQBot {
     return image
   }
 
+  /** Reuse the bytes used to classify an image when the reply is actually sent. */
+  async resolveImageUpload (file) {
+    const scope = getImageScope()
+    let cache = scope?.images.get(this)
+    if (scope && !cache) { cache = new Map(); scope.images.set(this, cache) }
+    const key = file?.url || file?.file || file
+    if (cache?.has(key)) return await cache.get(key)
+    const task = (async () => await convertImageToWebP(await this.resolveUploadFile(file)))()
+    cache?.set(key, task)
+    return await task
+  }
+
+  /** Pure rich-media replies must not create an extra keyboard-only Markdown message. */
+  async hasAutoButtonContent (data) {
+    for (const item of common.array(data)) {
+      if (!item) continue
+      if (['reply', 'at', 'small', 'micro', 'keyboard', 'button', 'file', 'video', 'audio', 'record'].includes(item.type)) continue
+      if (item.type === 'image') {
+        const file = item.url || item.file
+        if (isMaterialURL(file)) return true
+        if (item.animated === true) continue
+        if (!(await this.resolveImageUpload(file)).image_animated) return true
+        continue
+      }
+      if (item.type === 'markdown' && Array.isArray(item.data)) {
+        if (await this.hasAutoButtonContent(item.data)) return true
+        continue
+      }
+      if (item.type === 'text' || item.type === 'markdown' || typeof item === 'string') {
+        const text = typeof item === 'string' ? item : item.text ?? item.content ?? item.data?.content ??
+          (typeof item.data === 'string' ? item.data :
+            (item.params || item.data?.params)?.flatMap(parameter => parameter.values || []).join('\n') || '')
+        const pattern = /!\[[^\]]*\]\(((?:https?:\/\/|qqbot-media:\/\/)[^\s)]+)\)/g
+        const images = [...String(text).matchAll(pattern)]
+        if (String(text).replace(pattern, '').trim()) return true
+        for (const image of images) {
+          if (isMaterialURL(image[1]) || !(await this.resolveImageUpload(image[1])).image_animated) return true
+        }
+        continue
+      }
+      return true
+    }
+    return false
+  }
+
+  async getReplyAutoButtons (e) {
+    const cache = getImageScope()?.autoButtons
+    if (cache?.has(e)) return await cache.get(e)
+    const task = this.button(e)
+    cache?.set(e, task)
+    return await task
+  }
+
   /** 处理图片 */
   async getImage(file, e) {
-    file = await Bot.FormatFile(file)
+    file = file?.url || file?.file || file
     const type = 'image'
     if (isMaterialURL(file)) return { type, file }
-    const upload = await convertImageToWebP(await this.resolveUploadFile(file))
+    const upload = await this.resolveImageUpload(file)
     if (upload.image_animated) return { type: 'image', file: upload.buffer, name: upload.name, animated: true }
     file = upload.buffer
     if (this.qqImageHostEnabled && getMessagePolicy(this.config).mode !== 'legacy') {
@@ -1938,7 +1990,8 @@ export default class adapterQQBot {
 
   /** 新版 Markdown：仅使用 content */
   async markdown(e, data, Button = true) {
-    return await this.makeMarkdownMessage(e, data, Button ? { buttons: await this.button(e) } : {})
+    return await withImageScope(async () => await this.makeMarkdownMessage(e, data,
+      Button && await this.hasAutoButtonContent(data) ? { buttons: await this.getReplyAutoButtons(e) } : {}))
   }
 
   normalizeButtons(e, input) {
@@ -2503,7 +2556,7 @@ export default class adapterQQBot {
         let media = uploads.get(url)
         let upload = media ? undefined : resolved.get(url)
         if (!media && !upload) {
-          upload = await this.resolveUploadFile(url)
+          upload = await this.resolveImageUpload(url)
         }
         if (upload) {
           upload = await convertImageToWebP(upload)
@@ -2567,7 +2620,7 @@ export default class adapterQQBot {
   }
 
   async sendUploadedAttachment (targetType, targetId, uploaded, context = {}) {
-    const payload = { content: uploaded.name || '附件', msg_type: 7, media: { file_info: uploaded.file_info }, msg_seq: nextQQBotMessageSeq() }
+    const payload = { msg_type: 7, media: { file_info: uploaded.file_info }, msg_seq: nextQQBotMessageSeq() }
     if (context.messageId) payload.msg_id = context.messageId
     else if (context.eventId) payload.event_id = context.eventId
     const { data } = await this.sdk.request.post(`/v2/${targetType}s/${encodeURIComponent(targetId)}/messages`, payload)
@@ -2831,13 +2884,13 @@ export default class adapterQQBot {
       qqbot_recv_msg_setting: callback?.recv_msg_setting,
       raw_message: msg,
       msg,
-      reply: async (replyMsg) => {
+      reply: async (replyMsg) => await withImageScope(async () => {
         const hasExplicitButtons = common.array(replyMsg).some(item =>
           item?.type === 'keyboard' || item?.type === 'button' || QQBotButton.isButton(item)
         )
         const isProfilePanel = /^#面板(?:\s*\d{9,10})?$/.test(String(data.msg || ''))
-        if (!hasExplicitButtons || isProfilePanel) {
-          const buttons = await this.button(data)
+        if ((!hasExplicitButtons || isProfilePanel) && await this.hasAutoButtonContent(replyMsg)) {
+          const buttons = await this.getReplyAutoButtons(data)
           if (buttons?.length) {
             const content = isProfilePanel
               ? common.array(replyMsg).filter(item => item?.type !== 'keyboard' && item?.type !== 'button')
@@ -2853,7 +2906,7 @@ export default class adapterQQBot {
         } else {
           return this.sendFriendMsg(operatorId, replyMsg, { eventId: replyEventId })
         }
-      },
+      }),
     }
 
     // YunZai 装载器会将 text 段再次拼入 e.msg；与普通入站消息使用同一赋值器去重。
@@ -2871,8 +2924,8 @@ export default class adapterQQBot {
     data.sendMsg = data.reply
     // 回调也可能执行调用 e.markdown() 的插件；沿用互动 ID 的被动回复上下文。
     data.markdown = async (content, options = {}) => await withImageScope(async () => {
-      if (!options.buttons && !options.button) {
-        const buttons = await this.button(data)
+      if (!options.buttons && !options.button && await this.hasAutoButtonContent(content)) {
+        const buttons = await this.getReplyAutoButtons(data)
         if (buttons?.length) options = { ...options, buttons }
       }
       return data.reply(await this.makeMarkdownMessage(data, content, options))

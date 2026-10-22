@@ -13,6 +13,8 @@ await e.markdown('请选择操作', { buttons: [[{ label: '帮助', data: '#帮�
 
 QQBot 的 `e.reply()` 和 `e.markdown()` 会根据当前消息扫描已加载的按钮扩展。消息匹配某个扩展文件的规则后，适配器将该文件返回的按钮附加到回复底部。
 
+纯富媒体回复（动图、视频、语音、文件，包括只有动图链接的 Markdown）不自动匹配或附加按钮，避免另发一条空白 Markdown 键盘消息。静态图片、非空文本和普通 Markdown 正文继续使用自动按钮；插件显式提供的按钮会保留。同一次回复中的自动按钮查找结果会复用，防止回调的 Markdown 包装器和回复包装器重复执行同一扩展。多次独立调用 `e.reply()` 仍分别处理。
+
 ### 在 button 扩展文件中配置 small
 
 按钮文件可直接配置 `small: true`，无需修改发送消息的插件。支持文件级 `this.plugin.small`、单条匹配规则的 `rule.small`、返回的 `button/keyboard` 对象，以及简写按钮定义。`smallbtn` 和 `micro` 是同义字段，值必须为布尔值。
