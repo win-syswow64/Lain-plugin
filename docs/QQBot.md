@@ -70,6 +70,7 @@ token:
     timeout: 10000     # OpenAPI 和文件分片请求超时，单位毫秒
     toCallback: true   # QQGuild 频道兼容选项；QQ群/C2C 的 callback 始终是回调
     qqImageHost: true  # 官方 Markdown 图片素材图床开关；默认开启
+    silk: false       # 可选 Silk 转码，默认关闭；MP3/WAV/OGG 等直接上传
     other:
       Prefix: true     # 将 /命令转换为 #命令
 ```
@@ -116,7 +117,7 @@ await e.markdown('请选择操作：', {
 
 有关按钮自动附加、交互类型、mqqapi 内联命令转换，以及自定义底部按钮扩展文件，请看[QQBot 按钮使用与开发](./QQBot-Buttons.md)。
 
-图片、语音和视频需要可供 QQ 平台访问的公网 URL。可通过 `Bot.imageToUrl`、`Bot.audioToUrl`、`Bot.videoToUrl` 提供自定义转换，也可按 Lain-plugin 配置启用公网临时文件服务。具体代码示例见仓库内的 `plugins/纯文模板.js` 和 `plugins/纯文模板-优化混排.js`。
+媒体支持服务器可读取的本地文件、Buffer、base64 和公网 URL，由适配器读取后上传到对应的官方接口。音频和视频直接走富媒体上传，不需要先上传公网图床；静态图片可使用官方素材库或配置的图床。音频默认不调用云转码或 FFmpeg，详见下文的 Silk 转码开关。
 
 ## 白名单接口的异常处理
 
@@ -449,19 +450,43 @@ Lain-plugin 不再跟踪 `ws-plugin/` 和 `22009-plugin/` 目录，保留已有�
 ### 静态图片与动图、视频的区别
 
 - 只有静态图片进入 Markdown 图片和官方图片素材流程；官方图床开关继续生效。
-- 多帧 GIF、动态 WebP、APNG 等动图以原始文件走 `file_type: 4`、`msg_type: 7`，显示为文件消息，不转 WebP、不上传 Markdown 素材库。
+- 检测到的多帧 GIF、动态 WebP、APNG 等动图保留原始字节，按图片类型 `file_type: 1` 上传，再以 `msg_type: 7` 发送，不转 WebP、不上传 Markdown 素材库。官方概述列出的图片格式包括 jpg/png/gif/webp/bmp；实际展示和播放取决于平台对对应格式的支持。
 - 视频走 `file_type: 2`，音频走 `file_type: 3`，普通文件走 `file_type: 4`，均通过富媒体消息发送。
-- `e.reply()`、`e.markdown()`、群/私聊主动发送共用该分流。Markdown `![说明](URL)` 指向动图时，会替换为附件提示并发送原始文件；私聊 Markdown 流同样处理，避免每次更新重复发送同一附件。
+- `e.reply()`、`e.markdown()`、群/私聊主动发送共用该分流。Markdown `![说明](URL)` 指向动图时，另发富媒体图片并保留正文提示；即使平台返回 `raw_url` 也不再内嵌回 Markdown。私聊 Markdown 流同样处理，避免每次更新重复发送同一图片。
 - 一次回复同时含文字、按钮、静态图与文件时，富媒体分别发送，正文和按钮保留在 Markdown 消息中，各片段保留原有回复上下文。legacy 模式仍全部使用普通文本/富媒体。
 
 ```js
 // 静态图片使用 Markdown（raw / template 模式）。
 await e.reply(segment.image('/path/to/panel.png'))
-// 多帧动图即使通过 image 段提供，也会按文件发送。
+// 动图按富媒体图片发送，保留动画，不转为普通文件卡片。
 await e.reply(segment.image('/path/to/animation.gif'))
 await e.reply(['视频如下', segment.video('/path/to/video.mp4')])
 await e.markdown(['附件如下', { type: 'file', file: '/path/to/report.pdf', name: 'report.pdf' }])
 ```
+
+### 音频原格式上传与可选 Silk 转码
+
+官方[富媒体概述](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/rich-media.html)列出 silk/mp3/wav/ogg 语音格式。默认原样上传音频字节，`file_type: 3`、`msg_type: 7`，由 QQ 展示为语音；不是音乐分享卡片。文件名根据实际数据识别，MP3 不再被错误命名为 `.silk`；Buffer/base64 输入同样处理，Ogg 容器使用 `.ogg` 扩展名。
+
+在 `config/config/token.yaml` 对应 AppID 下配置，保存后自动生效：
+
+```yaml
+token:
+  "102089931":
+    silk: false  # 默认值；保留 MP3/WAV/OGG/Silk 等原始编码
+```
+
+需要兼容旧语音行为时显式设置 `silk: true`。开启后，非 Silk 音频使用 FFmpeg 转单声道 48kHz PCM，再由 silk-wasm 编码为 Silk；已有 Silk 数据直接复用。FFmpeg 可使用系统 PATH 或云崽 `config/config/bot.yaml` 的 `ffmpeg_path`。默认关闭时不执行该转换，也不调用旧的云转码或语音图床接口。
+
+```js
+await e.reply(segment.record('/path/to/music.mp3'))
+await e.reply({ type: 'audio', file: '/path/to/voice.ogg' })
+await e.markdown(['语音如下', { type: 'audio', file: '/path/to/voice.wav' }])
+```
+
+群聊、私聊、主动消息、回复和 Markdown 携带的音频统一遵守账号开关。转码使用独立临时目录，成功或失败后均清理；不修改原文件。大小判断基于最终上传字节，超过 5MiB 切换分片，超过对应媒体软限制才按普通文件上传。
+
+### 分片上传步骤
 
 1. 调用对应会话的 `/upload_prepare`，传入 `file_type`、文件名、大小、完整 MD5/SHA1，以及前 10002432 字节的 MD5。
 2. 按返回的分片大小和序号 PUT 到预签名 URL，每片成功后调用 `/upload_part_finish`；失败按服务端给出的重试超时和延迟重试。兼容服务端从 0 或 1 开始的连续分片序号，完成通知透传原序号；重复、缺失或不连续的序号会返回错误。
@@ -476,7 +501,7 @@ Markdown 中的大图片也分片上传，并使用合并响应的 `raw_url` 显
 
 ## Markdown 图片素材
 
-所有新上传的 QQBot 静态图片消息默认先在内存中转成 WebP，默认编码质量为 90，保留透明通道并自动处理方向。已是静态 WebP 的图片直接复用；先检查图片帧数，动图和普通文件消息按原始文件发送，不改变其内容。APNG 额外检查动画控制块，避免只识别首帧后误转静态图片。
+所有新上传的 QQBot 静态图片消息默认先在内存中转成 WebP，默认编码质量为 90，保留透明通道并自动处理方向。已是静态 WebP 的图片直接复用；先检查图片帧数，动图保留原格式走富媒体图片，普通文件消息按文件发送，不改变其内容。APNG 额外检查动画控制块，避免只识别首帧后误转静态图片。
 
 `raw` 和模板 Markdown 模式下，转换后单张实际大小严格小于 `10 * 1024 * 1024` 字节的图片默认上传到官方素材库。普通图片消息、本地文件、Buffer、base64、URL 图片、Markdown 内的公网图片和 C2C Markdown 流均适用；legacy 模式使用转换后的 WebP 走普通富媒体上传。等于或超过阈值、或素材接口不可用时，使用 WebP 富媒体流程，超过 5MiB 时走分片上传；没有可用图片链接时单独发送图片并保留正文、按钮和回复上下文。
 

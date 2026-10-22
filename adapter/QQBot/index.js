@@ -1,11 +1,8 @@
-import { exec } from 'child_process'
 import crypto from 'crypto'
 import fs from 'fs'
 import lodash from 'lodash'
 import fetch from 'node-fetch'
 import path from 'path'
-import wasm from 'silk-wasm';
-const { encode, isSilk } = wasm;
 import Yaml from 'yaml'
 import MiaoCfg from '../../../../lib/config/config.js'
 import loader from '../../../../lib/plugins/loader.js'
@@ -14,6 +11,7 @@ import Cfg from '../../lib/config/config.js'
 import Button from './plugins.js'
 import QQBotButton from './Button.js'
 import C2CStream from './C2CStream.js'
+import { prepareAudioUpload } from './Audio.js'
 import QQBotIdMap from '../../model/qqbot-id-map.js'
 import { installQQBotAPIPolicy, normalizeRestrictedAPIError, withQQBotAPIContext, reportQQBotAPIError, getQQBotAPIErrorCode } from './APIPolicy.js'
 import ImageMaterials, { IMAGE_MATERIAL_LIMIT, isMaterialURL } from './ImageMaterials.js'
@@ -1099,14 +1097,18 @@ export default class adapterQQBot {
     if (!['group', 'user'].includes(targetType)) throw new Error('QQBot 上传失败：未知会话类型')
     let upload = { ...(resolved || await this.resolveUploadFile(file, name)) }
     if (!Buffer.isBuffer(upload.buffer)) throw new Error('QQBot 上传失败：无法核实文件大小')
-    let requestedType = Number(fileType)
-    if (requestedType === 1) {
-      upload = await convertImageToWebP(upload)
-      if (upload.image_animated) requestedType = 4
+    const requestedType = Number(fileType)
+    if (requestedType === 1) upload = await convertImageToWebP(upload)
+    if (requestedType === 3) {
+      const silk = this.silkEnabled
+      const ffmpegPath = silk
+        ? Yaml.parse(fs.readFileSync('./config/config/bot.yaml', 'utf8'))?.ffmpeg_path || 'ffmpeg'
+        : 'ffmpeg'
+      upload = await prepareAudioUpload(upload, { silk, ffmpegPath })
     }
     upload.file_type = getUploadFileType(requestedType, upload.buffer.length)
     if (upload.name === 'file' && requestedType !== 4) {
-      upload.name = { 1: 'image.png', 2: 'video.mp4', 3: 'audio.silk' }[requestedType]
+      upload.name = { 1: 'image.png', 2: 'video.mp4', 3: 'audio' }[requestedType]
     }
     const collection = `${targetType}s`
     const encodedTargetId = encodeURIComponent(targetId)
@@ -1124,7 +1126,8 @@ export default class adapterQQBot {
 
     const { data } = response
     if (!data?.file_info) throw new Error('QQBot 文件上传失败：响应中没有 file_info')
-    return { ...data, name: upload.name, url: upload.url, size: upload.buffer.length, file_type: upload.file_type, requested_file_type: requestedType }
+    return { ...data, name: upload.name, url: upload.url, size: upload.buffer.length, file_type: upload.file_type,
+      requested_file_type: requestedType, image_animated: upload.image_animated === true }
   }
 
   /**
@@ -1277,7 +1280,7 @@ export default class adapterQQBot {
   }
 
   getUploadFileName (file) {
-    if (typeof file !== 'string') return 'file'
+    if (typeof file !== 'string' || /^base64:\/\//i.test(file)) return 'file'
     const clean = file.replace(/^file:\/\//, '').split('?')[0]
     try {
       const pathname = /^https?:\/\//.test(file) ? new URL(file).pathname : clean
@@ -1713,34 +1716,6 @@ export default class adapterQQBot {
     })
     return logMessage.join('')
   }
-  /** ffmpeg转码 转为pcm */
-  async runFfmpeg(input, output) {
-    let cm
-    let ret = await new Promise((resolve, reject) => exec('ffmpeg -version', { windowsHide: true }, (error, stdout, stderr) => resolve({ error, stdout, stderr })))
-    return new Promise((resolve, reject) => {
-      if (ret.stdout) {
-        cm = 'ffmpeg'
-      } else {
-        const cfg = Yaml.parse(fs.readFileSync('./config/config/bot.yaml', 'utf8'))
-        cm = cfg.ffmpeg_path ? `"${cfg.ffmpeg_path}"` : null
-      }
-
-      if (!cm) {
-        throw new Error('未检测到 ffmpeg ，无法进行转码，请正确配置环境变量或手动前往 bot.yaml 进行配置')
-      }
-
-      exec(`${cm} -i "${input}" -f s16le -ar 48000 -ac 1 "${output}"`, async (error, stdout, stderr) => {
-        if (error) {
-          common.error('Lain-plugin', `执行错误: ${error}`)
-          reject(error)
-          return
-        }
-        resolve()
-      }
-      )
-    })
-  }
-
   /** 静态图片和正文使用 Markdown；其他媒体单独发送，保留原有片段顺序。 */
   async getQQBot(data, e) {
     data = common.array(data)
@@ -1811,7 +1786,7 @@ export default class adapterQQBot {
         }
         case 'image': {
           const image = await this.getImage(i?.url || i.file, e)
-          if (image.type === 'file') {
+          if (image.animated) {
             await flushMarkdown()
             appendMedia(image)
           } else content += `![${i.summary || '图片'} #${image.width || 0}px #${image.height || 0}px](${this.markdownImageURL(image.file)})`
@@ -1844,8 +1819,7 @@ export default class adapterQQBot {
         case 'embed':
         default:
           await flushMarkdown()
-          if (i.type === 'record') i = await this.getAudio(i.file)
-          else if (i.type === 'audio') i = await this.getAudio(i.file || i.url)
+          if (i.type === 'record' || i.type === 'audio') i = await this.getAudio(i.file || i.url, i.name)
           else if (i.type === 'video') i = await this.getVideo(i?.url || i.file)
           appendMedia(i)
           break
@@ -1872,6 +1846,10 @@ export default class adapterQQBot {
     return isQQImageHostEnabled(Bot?.[this.id]?.config || this.config)
   }
 
+  get silkEnabled () {
+    return (Bot?.[this.id]?.config || this.config)?.silk === true
+  }
+
   rememberHostedImage (image) {
     const hosted = getImageScope()?.hosted
     hosted?.add(`${this.id}:${image.file}`)
@@ -1885,7 +1863,7 @@ export default class adapterQQBot {
     const type = 'image'
     if (isMaterialURL(file)) return { type, file }
     const upload = await convertImageToWebP(await this.resolveUploadFile(file))
-    if (upload.image_animated) return { type: 'file', file: upload.buffer, name: upload.name }
+    if (upload.image_animated) return { type: 'image', file: upload.buffer, name: upload.name, animated: true }
     file = upload.buffer
     if (this.qqImageHostEnabled && getMessagePolicy(this.config).mode !== 'legacy') {
       try {
@@ -1950,109 +1928,17 @@ export default class adapterQQBot {
     return { type: 'video', file: await Bot.FormatFile(file) }
   }
   
-  async silkEncode(file, mp3, pcm) {
-    const buffer = await Bot.Buffer(file);
-    if (isSilk(buffer)) return buffer;
-
-    fs.writeFileSync(mp3, buffer)
-
-    await this.runFfmpeg(mp3, pcm)
-    common.mark('Lain-plugin', 'mp3 => pcm 完成!')
-    common.mark('Lain-plugin', 'pcm => silk 进行中!')
-    const pamBuffer = await fs.promises.readFile(pcm)
-    const { data } = await encode(pamBuffer, 48000)
-    return Buffer.from(data)
-  }
-
-  /** 处理语音 */
-  async getAudio(file) {
-    /** icqq高清语音 */
+  /** 音频默认保留原始编码，是否转 Silk 由统一上传入口的账号配置决定。 */
+  async getAudio(file, name) {
     if (typeof file === 'string' && file.startsWith('protobuf://')) {
-      return { type: 'audio', file: await Bot.getPttUrl(Bot.ICQQproto(file)[3]) }
+      file = await Bot.getPttUrl(Bot.ICQQproto(file)[3])
     }
-
-    try {
-      /** 自定义语音接口 */
-      if (Bot?.silkToUrl) {
-        const url = await Bot.silkToUrl(file)
-        if (url) {
-          common.mark('Lain-plugin', `<云转码:${url}>`)
-          return { type: 'audio', file: url }
-        }
-      }
-    } catch (error) {
-      logger.error('云转码失败')
-      logger.error(error)
-    }
-
-    const type = 'audio'
-    const start = Date.now();
-    const _path = process.cwd() + '/resources/temp'
-    try { await fs.promises.mkdir(_path) } catch (error) { }  // 尝试创建文件夹
-    const mp3 = path.join(_path, `${start}.mp3`)
-    const pcm = path.join(_path, `${start}.pcm`)
-    const silk = path.join(_path, `${start}.silk`)
-    fs.writeFileSync(silk, await this.silkEncode(file, mp3, pcm))
-    common.mark('Lain-plugin', 'pcm => silk 完成!')
-    /** 保存为MP3文件 */
-    // fs.writeFileSync(mp3, await Bot.Buffer(file))
-    // /** mp3 转 pcm */
-    // await this.runFfmpeg(mp3, pcm)
-    // common.mark('Lain-plugin', 'mp3 => pcm 完成!')
-    // common.mark('Lain-plugin', 'pcm => silk 进行中!')
-
-    /** pcm 转 silk */
-    // await encodeSilk(fs.readFileSync(pcm), 48000)
-    //   .then((silkData) => {
-    //     /** 转silk完成，保存 */
-    //     fs.writeFileSync(silk, silkData?.data || silkData)
-    //     /** 删除初始mp3文件 */
-    //     fs.promises.unlink(mp3, () => { })
-    //     /** 删除pcm文件 */
-    //     fs.promises.unlink(pcm, () => { })
-    //     common.mark('Lain-plugin', 'pcm => silk 完成!')
-    //   })
-    //   .catch((err) => {
-    //     /** 删除初始mp3文件 */
-    //     fs.promises.unlink(mp3, () => { })
-    //     /** 删除pcm文件 */
-    //     fs.promises.unlink(pcm, () => { })
-    //     common.error('Lain-plugin', `转码失败${err}`)
-    //     return { type: 'text', text: `转码失败${err}` }
-    //   })
-    try {
-      if (Bot?.audioToUrl) {
-        const { url } = await Bot.audioToUrl(silk)
-        common.mark('Lain-plugin', `使用自定义图床发送语音：${url}`)
-        common.log('Lain-plugin', `url：${url}`)
-        fs.promises.unlink(mp3, () => { })
-        fs.promises.unlink(pcm, () => { })
-        fs.promises.unlink(silk, () => { })
-        return { type, file: url }
-      }
-    } catch (error) {
-      logger.error('[调用错误][自定义图床] 将继续公网发送语音')
-      logger.error(error)
-    }
-
-    const { url } = await Bot.FileToUrl(file)
-    common.mark('Lain-plugin', `使用公网临时服务器：${url}`)
-    fs.promises.unlink(mp3, () => { })
-    fs.promises.unlink(pcm, () => { })
-    fs.promises.unlink(silk, () => { })
-    return { type, file: url }
+    return { type: 'audio', file: await Bot.FormatFile(file), ...(name ? { name } : {}) }
   }
 
   /** 新版 Markdown：仅使用 content */
   async markdown(e, data, Button = true) {
-    const message = [{ type: 'markdown', content: await this.makeMarkdownContent(e, data) }]
-    if (Button) {
-      const buttonRows = this.normalizeButtons(e, await this.button(e))
-      if (buttonRows?.length) {
-        message.push({ type: 'keyboard', content: { rows: buttonRows } })
-      }
-    }
-    return message
+    return await this.makeMarkdownMessage(e, data, Button ? { buttons: await this.button(e) } : {})
   }
 
   normalizeButtons(e, input) {
@@ -2207,7 +2093,7 @@ export default class adapterQQBot {
           break
         case 'image': {
           const image = await this.getImage(i?.url || i.file, e)
-          if (image.type === 'file') {
+          if (image.animated) {
             if (!options.mediaAttachments) throw new Error('动图需要通过完整的消息发送入口发送')
             options.mediaAttachments.push(image)
           } else content.push(`![${i.summary || '图片'} #${image.width || 0}px #${image.height || 0}px](${this.markdownImageURL(image.file)})`)
@@ -2224,7 +2110,7 @@ export default class adapterQQBot {
         case 'record':
           if (!options.mediaAttachments) throw new Error('富媒体需要通过完整的消息发送入口发送')
           options.mediaAttachments.push(i.type === 'record' || i.type === 'audio'
-            ? await this.getAudio(i.file || i.url) : { ...i, file: i.file || i.url || i.data?.file })
+            ? await this.getAudio(i.file || i.url, i.name) : { ...i, file: i.file || i.url || i.data?.file })
           break
         default:
           if (typeof i === 'string') content.push(i)
@@ -2629,7 +2515,7 @@ export default class adapterQQBot {
           continue
         }
         if (!media && upload.image_animated) {
-          media = await this.uploadRichFile(targetType, targetId, url, upload.name, 4, upload)
+          media = await this.uploadRichFile(targetType, targetId, url, upload.name, 1, upload)
           uploads.set(url, media)
           resolved.delete(url)
         }
@@ -2666,11 +2552,11 @@ export default class adapterQQBot {
           if (media.raw_url) uploads.set(media.raw_url, media)
           resolved.delete(url)
         }
-        if (media.file_type === 1 && /^https?:\/\//.test(media.raw_url || '')) {
+        if (!media.image_animated && media.file_type === 1 && /^https?:\/\//.test(media.raw_url || '')) {
           content += match[0].replace(url, media.raw_url)
         } else {
           if (!attachmentIds.has(media.file_info)) { attachments.push(media); attachmentIds.add(media.file_info) }
-          content += '[图片已作为附件发送]'
+          content += media.image_animated && media.file_type === 1 ? '[动图已作为图片消息发送]' : '[图片已作为附件发送]'
         }
         offset = match.index + match[0].length
       }
@@ -2702,9 +2588,9 @@ export default class adapterQQBot {
   /** 一条云崽消息可包含普通内容和文件；文件通过富媒体接口单独发送。 */
   async sendQQBotPiece (targetType, targetId, message, source = {}) {
     const parts = common.array(message)
-    const richTypes = ['file', 'video', 'audio', 'record']
-    const files = parts.filter(item => richTypes.includes(item?.type))
-    const normal = parts.filter(item => !richTypes.includes(item?.type))
+    const isRich = item => ['file', 'video', 'audio', 'record'].includes(item?.type) || (item?.type === 'image' && item.animated)
+    const files = parts.filter(isRich)
+    const normal = parts.filter(item => !isRich(item))
     const reply = normal.find(item => item?.type === 'reply')
     const normalContent = normal.filter(item => item?.type !== 'reply').map(item => {
       if (targetType !== 'user' || item?.type !== 'markdown' || typeof item.content !== 'string') return item
@@ -2719,7 +2605,7 @@ export default class adapterQQBot {
     let result
 
     for (const file of files) {
-      const type = { video: 2, audio: 3, record: 3, file: 4 }[file.type]
+      const type = { image: 1, video: 2, audio: 3, record: 3, file: 4 }[file.type]
       const sent = await this.sendRichFile(targetType, targetId, file.file || file.url, file.name, sendSource, type)
       result ||= sent
     }

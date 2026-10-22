@@ -53,6 +53,7 @@ export class adapter extends plugin {
       secret: '',
       toCallback: true,
       qqImageHost: true,
+      silk: false,
       other: {
         Prefix: true,
         QQ: '',
