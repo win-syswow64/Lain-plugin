@@ -172,6 +172,7 @@ export default class ImageMaterials {
   async upload (source) {
     if (this.adapter.qqImageHostEnabled === false) return null
     const upload = await convertImageToWebP(source)
+    if (upload.image_animated) return null
     if (upload.buffer.length >= IMAGE_MATERIAL_LIMIT) return null
     const md5 = crypto.createHash('md5').update(upload.buffer).digest('hex')
     const key = this.key(md5)

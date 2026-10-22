@@ -28,6 +28,8 @@ function getAPIName (method, pathname) {
   if (material) return ({ prepare: '申请图片素材上传', complete: '完成图片素材上传' })[material[1]] ||
     (String(method).toUpperCase() === 'DELETE' ? '删除图片素材' : '查询图片素材')
   if (/\/restrict_chat_setting$/.test(pathname)) return String(method).toUpperCase() === 'GET' ? '查询群禁言' : '设置群禁言'
+  if (/\/join_request_list$/.test(pathname)) return '获取入群申请列表'
+  if (/\/approval_join_request\/[^/]+$/.test(pathname)) return '审批入群申请'
   return pathname
 }
 

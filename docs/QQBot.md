@@ -352,6 +352,8 @@ await group.approveJoinRequest('成员 OpenID', true, {
 
 拒绝申请时，可在理由中加入 `--拉黑`，同时把成员加入群黑名单；只有拒绝操作支持该选项。命令也兼容 `#QQ群加群申请...` 和 `#QQBot处理入群申请...` 形式。
 
+Lain 内置的 `apps/group_join_request.js` 会自动接收入群请求、发送通知，并提供引用与按钮审批。QQ群通知附带仅管理员可点的“同意”“拒绝”回调按钮；通知发送失败时改为私聊主人。支持 `request.group.add` 和 `e.approve()` 的其他适配器也可使用通知和引用审批。使用方法与权限规则见[入群申请通知与审批](./Group-Join-Requests.md)。
+
 适配器还暴露自动审批策略 API，供插件直接调用：
 
 ```js
@@ -442,7 +444,24 @@ Lain-plugin 不再跟踪 `ws-plugin/` 和 `22009-plugin/` 目录，保留已有�
 
 ## 大文件与分片上传
 
-群聊、C2C 私聊共用同一上传入口。普通文件、图片、视频、语音均检查实际字节数，来源支持本地路径、Buffer、base64 和 HTTP/HTTPS URL。图片消息先转为 WebP，大小判断使用转换后的字节数。开启 Markdown 时，小于 10MiB 的 WebP 图片优先使用下述素材接口；其他富媒体以 `5 * 1024 * 1024` 字节（5MiB）为阈值：不超过阈值使用 `/files` 的 `file_data` 二进制直传，超过阈值使用官方分片流程。URL 先下载核实大小，不仅依赖 Content-Length。
+群聊、C2C 私聊共用同一上传入口。普通文件、图片、视频、语音均检查实际字节数，来源支持本地路径、Buffer、base64 和 HTTP/HTTPS URL。静态图片先转为 WebP，大小判断使用转换后的字节数；动图保留原始数据和格式。开启 Markdown 时，小于 10MiB 的静态 WebP 图片优先使用下述素材接口；其他富媒体以 `5 * 1024 * 1024` 字节（5MiB）为阈值：不超过阈值使用 `/files` 的 `file_data` 二进制直传，超过阈值使用官方分片流程。URL 先下载核实大小，不仅依赖 Content-Length。
+
+### 静态图片与动图、视频的区别
+
+- 只有静态图片进入 Markdown 图片和官方图片素材流程；官方图床开关继续生效。
+- 多帧 GIF、动态 WebP、APNG 等动图以原始文件走 `file_type: 4`、`msg_type: 7`，显示为文件消息，不转 WebP、不上传 Markdown 素材库。
+- 视频走 `file_type: 2`，音频走 `file_type: 3`，普通文件走 `file_type: 4`，均通过富媒体消息发送。
+- `e.reply()`、`e.markdown()`、群/私聊主动发送共用该分流。Markdown `![说明](URL)` 指向动图时，会替换为附件提示并发送原始文件；私聊 Markdown 流同样处理，避免每次更新重复发送同一附件。
+- 一次回复同时含文字、按钮、静态图与文件时，富媒体分别发送，正文和按钮保留在 Markdown 消息中，各片段保留原有回复上下文。legacy 模式仍全部使用普通文本/富媒体。
+
+```js
+// 静态图片使用 Markdown（raw / template 模式）。
+await e.reply(segment.image('/path/to/panel.png'))
+// 多帧动图即使通过 image 段提供，也会按文件发送。
+await e.reply(segment.image('/path/to/animation.gif'))
+await e.reply(['视频如下', segment.video('/path/to/video.mp4')])
+await e.markdown(['附件如下', { type: 'file', file: '/path/to/report.pdf', name: 'report.pdf' }])
+```
 
 1. 调用对应会话的 `/upload_prepare`，传入 `file_type`、文件名、大小、完整 MD5/SHA1，以及前 10002432 字节的 MD5。
 2. 按返回的分片大小和序号 PUT 到预签名 URL，每片成功后调用 `/upload_part_finish`；失败按服务端给出的重试超时和延迟重试。兼容服务端从 0 或 1 开始的连续分片序号，完成通知透传原序号；重复、缺失或不连续的序号会返回错误。
@@ -457,7 +476,7 @@ Markdown 中的大图片也分片上传，并使用合并响应的 `raw_url` 显
 
 ## Markdown 图片素材
 
-所有新上传的 QQBot 图片消息默认先在内存中转成 WebP，默认编码质量为 90，保留透明通道；GIF/动态 WebP 按多帧读取并输出，静态图片自动处理方向。已是 WebP 的图片直接复用；普通文件消息按文件发送，不改变其内容。
+所有新上传的 QQBot 静态图片消息默认先在内存中转成 WebP，默认编码质量为 90，保留透明通道并自动处理方向。已是静态 WebP 的图片直接复用；先检查图片帧数，动图和普通文件消息按原始文件发送，不改变其内容。APNG 额外检查动画控制块，避免只识别首帧后误转静态图片。
 
 `raw` 和模板 Markdown 模式下，转换后单张实际大小严格小于 `10 * 1024 * 1024` 字节的图片默认上传到官方素材库。普通图片消息、本地文件、Buffer、base64、URL 图片、Markdown 内的公网图片和 C2C Markdown 流均适用；legacy 模式使用转换后的 WebP 走普通富媒体上传。等于或超过阈值、或素材接口不可用时，使用 WebP 富媒体流程，超过 5MiB 时走分片上传；没有可用图片链接时单独发送图片并保留正文、按钮和回复上下文。
 

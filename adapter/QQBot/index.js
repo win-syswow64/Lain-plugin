@@ -1099,8 +1099,11 @@ export default class adapterQQBot {
     if (!['group', 'user'].includes(targetType)) throw new Error('QQBot 上传失败：未知会话类型')
     let upload = { ...(resolved || await this.resolveUploadFile(file, name)) }
     if (!Buffer.isBuffer(upload.buffer)) throw new Error('QQBot 上传失败：无法核实文件大小')
-    const requestedType = Number(fileType)
-    if (requestedType === 1) upload = await convertImageToWebP(upload)
+    let requestedType = Number(fileType)
+    if (requestedType === 1) {
+      upload = await convertImageToWebP(upload)
+      if (upload.image_animated) requestedType = 4
+    }
     upload.file_type = getUploadFileType(requestedType, upload.buffer.length)
     if (upload.name === 'file' && requestedType !== 4) {
       upload.name = { 1: 'image.png', 2: 'video.mp4', 3: 'audio.silk' }[requestedType]
@@ -1220,8 +1223,8 @@ export default class adapterQQBot {
   }
 
   /** 发送 QQ 富媒体文件消息。C2C / 群被动回复时附带消息上下文。 */
-  async sendRichFile (targetType, targetId, file, name, source = {}) {
-    const uploaded = await this.uploadRichFile(targetType, targetId, file, name)
+  async sendRichFile (targetType, targetId, file, name, source = {}, fileType = 4) {
+    const uploaded = await this.uploadRichFile(targetType, targetId, file, name, fileType)
     const payload = {
       content: uploaded.name || '文件',
       msg_type: 7,
@@ -1238,8 +1241,9 @@ export default class adapterQQBot {
     }
     const { data } = await this.sdk.request.post(`/v2/${targetType}s/${encodeURIComponent(targetId)}/messages`, payload)
     if (!data?.id) throw new Error('QQBot 文件消息发送失败：响应中没有消息 ID')
-    await this.recordSuccessfulSend(targetType, targetId, [])
-    await this.cacheSentMessage(targetType === 'group' ? 'group' : 'user', targetId, data, [{ type: 'file', name: uploaded.name }])
+    const message = [{ type: ({ 1: 'image', 2: 'video', 3: 'audio' })[uploaded.file_type] || 'file', name: uploaded.name }]
+    await this.recordSuccessfulSend(targetType, targetId, message)
+    await this.cacheSentMessage(targetType === 'group' ? 'group' : 'user', targetId, data, message)
     return { ...data, file_id: uploaded.file_uuid, file_info: uploaded.file_info }
   }
 
@@ -1737,7 +1741,7 @@ export default class adapterQQBot {
     })
   }
 
-  /** 转换message：QQBot 新版仅使用 markdown.content + button */
+  /** 静态图片和正文使用 Markdown；其他媒体单独发送，保留原有片段顺序。 */
   async getQQBot(data, e) {
     data = common.array(data)
     const small = getSmallSetting(data) ?? getSmallSetting(e) ?? getMessagePolicy(this.config).small
@@ -1747,6 +1751,7 @@ export default class adapterQQBot {
     let normalMsg = []
     let content = ''
     const buttonRows = []
+    const appendMedia = item => { message.push(item); Pieces.push([item]) }
 
     const flushMarkdown = async () => {
       if (!content && !buttonRows.length) return
@@ -1806,7 +1811,10 @@ export default class adapterQQBot {
         }
         case 'image': {
           const image = await this.getImage(i?.url || i.file, e)
-          content += `![${i.summary || '图片'} #${image.width || 0}px #${image.height || 0}px](${this.markdownImageURL(image.file)})`
+          if (image.type === 'file') {
+            await flushMarkdown()
+            appendMedia(image)
+          } else content += `![${i.summary || '图片'} #${image.width || 0}px #${image.height || 0}px](${this.markdownImageURL(image.file)})`
           break
         }
         case 'button':
@@ -1817,7 +1825,9 @@ export default class adapterQQBot {
           break
         case 'markdown':
           {
-            const inlineCommands = this.extractMqqapiInlineCommands(await this.makeMarkdownContent(e, i.data || i))
+            const mediaAttachments = []
+            const inlineCommands = this.extractMqqapiInlineCommands(await this.makeMarkdownContent(e, i.data || i, { mediaAttachments }))
+            if (mediaAttachments.length) { await flushMarkdown(); mediaAttachments.forEach(appendMedia) }
             appendText(inlineCommands.content)
             if (inlineCommands.buttons.length) {
               buttonRows.push(...this.normalizeButtons(e, [inlineCommands.buttons]))
@@ -1837,11 +1847,11 @@ export default class adapterQQBot {
           if (i.type === 'record') i = await this.getAudio(i.file)
           else if (i.type === 'audio') i = await this.getAudio(i.file || i.url)
           else if (i.type === 'video') i = await this.getVideo(i?.url || i.file)
-          message.push(i)
+          appendMedia(i)
           break
         case 'file':
           await flushMarkdown()
-          message.push({
+          appendMedia({
             type: 'file',
             file: i.file || i.url || i.data?.file,
             name: i.name || i.data?.name
@@ -1851,7 +1861,6 @@ export default class adapterQQBot {
     }
 
     if (content || buttonRows.length) await flushMarkdown()
-    if (message.length) Pieces.unshift(message)
     normalMsg = message.length ? [message] : []
 
     common.log('Lain-plugin', `${this.id} 发送消息: ${JSON.stringify(Pieces)}`)
@@ -1876,6 +1885,7 @@ export default class adapterQQBot {
     const type = 'image'
     if (isMaterialURL(file)) return { type, file }
     const upload = await convertImageToWebP(await this.resolveUploadFile(file))
+    if (upload.image_animated) return { type: 'file', file: upload.buffer, name: upload.name }
     file = upload.buffer
     if (this.qqImageHostEnabled && getMessagePolicy(this.config).mode !== 'legacy') {
       try {
@@ -2197,13 +2207,24 @@ export default class adapterQQBot {
           break
         case 'image': {
           const image = await this.getImage(i?.url || i.file, e)
-          content.push(`![${i.summary || '图片'} #${image.width || 0}px #${image.height || 0}px](${this.markdownImageURL(image.file)})`)
+          if (image.type === 'file') {
+            if (!options.mediaAttachments) throw new Error('动图需要通过完整的消息发送入口发送')
+            options.mediaAttachments.push(image)
+          } else content.push(`![${i.summary || '图片'} #${image.width || 0}px #${image.height || 0}px](${this.markdownImageURL(image.file)})`)
           break
         }
         case 'markdown':
           if (typeof i.data === 'string') content.push(i.data)
           else if (i.data?.content) content.push(i.data.content)
           else if (i.content) content.push(i.content)
+          break
+        case 'file':
+        case 'video':
+        case 'audio':
+        case 'record':
+          if (!options.mediaAttachments) throw new Error('富媒体需要通过完整的消息发送入口发送')
+          options.mediaAttachments.push(i.type === 'record' || i.type === 'audio'
+            ? await this.getAudio(i.file || i.url) : { ...i, file: i.file || i.url || i.data?.file })
           break
         default:
           if (typeof i === 'string') content.push(i)
@@ -2215,15 +2236,17 @@ export default class adapterQQBot {
   }
 
   async makeMarkdownMessage(e, data, options = {}) {
-    const markdown = await this.makeMarkdownSegment(e, data, options)
+    const mediaAttachments = []
+    const markdown = await this.makeMarkdownSegment(e, data, { ...options, mediaAttachments })
     const inlineCommands = this.extractMqqapiInlineCommands(markdown.content)
     markdown.content = inlineCommands.content || (inlineCommands.buttons.length ? ' ' : inlineCommands.content)
-    const message = [markdown]
+    const message = [...mediaAttachments, ...(!mediaAttachments.length || markdown.content.trim() ? [markdown] : [])]
 
     const btnRows = this.normalizeButtons(e, options.buttons || options.button)
     const inlineButtonRows = this.normalizeButtons(e, [inlineCommands.buttons])
     const allButtonRows = [...inlineButtonRows, ...btnRows].slice(0, 5)
     if (allButtonRows.length) {
+      if (!message.some(item => item.type === 'markdown')) message.push({ type: 'markdown', content: ' ' })
       message.push({ type: 'keyboard', content: { rows: allButtonRows } })
     }
 
@@ -2605,6 +2628,11 @@ export default class adapterQQBot {
           offset = match.index + match[0].length
           continue
         }
+        if (!media && upload.image_animated) {
+          media = await this.uploadRichFile(targetType, targetId, url, upload.name, 4, upload)
+          uploads.set(url, media)
+          resolved.delete(url)
+        }
         if (!useMaterials && !media && upload.buffer.length <= DIRECT_UPLOAD_LIMIT) {
           // Do not send custom-host URLs back through the official material API.
           // Explicit Markdown URLs still pass through the default WebP conversion.
@@ -2674,8 +2702,9 @@ export default class adapterQQBot {
   /** 一条云崽消息可包含普通内容和文件；文件通过富媒体接口单独发送。 */
   async sendQQBotPiece (targetType, targetId, message, source = {}) {
     const parts = common.array(message)
-    const files = parts.filter(item => item?.type === 'file')
-    const normal = parts.filter(item => item?.type !== 'file')
+    const richTypes = ['file', 'video', 'audio', 'record']
+    const files = parts.filter(item => richTypes.includes(item?.type))
+    const normal = parts.filter(item => !richTypes.includes(item?.type))
     const reply = normal.find(item => item?.type === 'reply')
     const normalContent = normal.filter(item => item?.type !== 'reply').map(item => {
       if (targetType !== 'user' || item?.type !== 'markdown' || typeof item.content !== 'string') return item
@@ -2690,7 +2719,8 @@ export default class adapterQQBot {
     let result
 
     for (const file of files) {
-      const sent = await this.sendRichFile(targetType, targetId, file.file || file.url, file.name, sendSource)
+      const type = { video: 2, audio: 3, record: 3, file: 4 }[file.type]
+      const sent = await this.sendRichFile(targetType, targetId, file.file || file.url, file.name, sendSource, type)
       result ||= sent
     }
     // 文件消息的 reply 段已被转换为 msg_id；避免再单独发送一个空引用消息。
@@ -2893,6 +2923,9 @@ export default class adapterQQBot {
       qqbot_event_type: 'INTERACTION_CREATE',
       qqbot_event_id: replyEventId,
       qqbot_interaction_id: interactionId,
+      qqbot_callback_permission: ownCallback?.permission,
+      qqbot_callback_group_openid: ownCallback?.group_id,
+      qqbot_callback_message: ownCallback?.message,
       message_id: 'event_' + replyEventId,
       time: Number.isFinite(Date.parse(event.timestamp)) ? Date.parse(event.timestamp) / 1000 : Date.now() / 1000,
       user_id: this.formatQQBotId(operatorId),
@@ -3119,12 +3152,13 @@ export default class adapterQQBot {
     if (actionType !== 1) return button
     if (String(button.id).startsWith('bt_') && Bot[this.id]?.callback?.[button.id]) return button
     const id = 'bt_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)
+    const { _lainCallbackTTL, ...wireButton } = button
     const converted = {
-      ...button,
+      ...wireButton,
       id,
       action: { ...button.action, enter: false, reply: false }
     }
-    this._trackCallback(e, id, converted.action.data)
+    this._trackCallback(e, id, converted.action.data, converted.action.permission, _lainCallbackTTL)
     return converted
   }
 
@@ -3147,19 +3181,21 @@ export default class adapterQQBot {
   }
 
   /** 追踪回调按钮 */
-  _trackCallback (e, btnId, message) {
+  _trackCallback (e, btnId, message, permission, lifetime = 300000) {
     if (!Bot[this.id].callback) Bot[this.id].callback = {}
     Bot[this.id].callback[btnId] = {
       id: e.message_id,
       user_id: e.user_id,
       group_id: e.group_id ? String(e.group_id).replace(this.id + '-', '') : undefined,
       message,
+      permission: permission ? { ...permission } : undefined,
       recv_msg_setting: e.qqbot_recv_msg_setting,
       message_id: e._ret_id || [],
     }
-    setTimeout(() => {
+    const timeout = setTimeout(() => {
       if (Bot[this.id]?.callback) delete Bot[this.id].callback[btnId]
-    }, 300000)
+    }, Math.max(300000, Math.min(Number(lifetime) || 300000, 3600000)))
+    timeout.unref?.()
   }
 
   // ========== Markdown 内容构建 ==========

@@ -24,12 +24,31 @@ export async function withImageScope (callback, scope) {
   })
 }
 
-/** 纯内存转换；不生成临时文件，也不修改调用者的原文件。 */
+// libvips may only expose the first APNG frame; read the animation control chunk too.
+function pngFrames (buffer) {
+  if (buffer.length < 8 || buffer.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') return 1
+  for (let offset = 8; offset + 12 <= buffer.length;) {
+    const length = buffer.readUInt32BE(offset)
+    if (offset + length + 12 > buffer.length) break
+    const type = buffer.toString('ascii', offset + 4, offset + 8)
+    if (type === 'acTL' && length >= 8) return buffer.readUInt32BE(offset + 8)
+    if (type === 'IDAT' || type === 'IEND') break
+    offset += length + 12
+  }
+  return 1
+}
+
+/** 静态图片在内存转 WebP；多帧图片保留原始文件交给富媒体接口。 */
 export async function convertImageToWebP (upload, { force = false } = {}) {
   if (!Buffer.isBuffer(upload?.buffer) || !upload.buffer.length) throw new Error('QQBot 图片转换失败：缺少图片数据')
-  if (!force && upload.image_format === 'webp') return upload
+  if (upload.image_animated || (!force && upload.image_format === 'webp')) return upload
   let buffer = upload.buffer
   let metadata = await sharp(buffer, { animated: true }).metadata()
+  if (Number(metadata.pages) > 1 || pngFrames(buffer) > 1) {
+    return { ...upload, name: !upload.name || upload.name === 'file' ? `image.${metadata.format}` : upload.name,
+      image_format: metadata.format, image_animated: true,
+      width: metadata.width, height: metadata.pageHeight || metadata.height }
+  }
   if (force || metadata.format !== 'webp' || (metadata.orientation > 1 && !(metadata.pages > 1))) {
     const image = sharp(buffer, { animated: true })
     if (!(metadata.pages > 1)) image.rotate()
