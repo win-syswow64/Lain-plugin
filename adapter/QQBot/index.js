@@ -2127,7 +2127,13 @@ export default class adapterQQBot {
       switch (i.type) {
         case 'text':
         case 'forward':
-          if (i.text) content.push(String(i.text).replace(/@/g, '@\u200B').replace(/<qqbot-/g, '<qqbot-\u200B'))
+          // 转发节点在 Markdown 中同样独占一行；多段最终 join('') 拼接，需显式补换行，
+          // 否则转发内容拍平后会挤成一行
+          if (i.text) {
+            let forwardText = String(i.text).replace(/@/g, '@\u200B').replace(/<qqbot-/g, '<qqbot-\u200B')
+            if (i.type === 'forward' && !forwardText.endsWith('\n')) forwardText += '\n'
+            content.push(forwardText)
+          }
           break
         case 'at':
           if (!e?.group_id) break
