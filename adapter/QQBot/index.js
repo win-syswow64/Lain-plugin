@@ -1756,10 +1756,12 @@ export default class adapterQQBot {
         case 'text':
         case 'forward': {
           if (!String(i.text || '').trim()) break
-          let text = i.type === 'forward' ? String(i.text).trim() + '\n' : String(i.text).trim()
+          let text = String(i.text).trim()
           text = text.replace('@everyone', 'everyone')
           const inlineCommands = this.extractMqqapiInlineCommands(text)
           text = inlineCommands.content
+          // 按钮解析会 trim 正文，因此在解析后补回转发节点的分隔换行。
+          if (i.type === 'forward' && text) text += '\n'
           if (inlineCommands.buttons.length) {
             buttonRows.push(...this.normalizeButtons(e, [inlineCommands.buttons]))
           }
@@ -2131,7 +2133,13 @@ export default class adapterQQBot {
       switch (i.type) {
         case 'text':
         case 'forward':
-          if (i.text) content.push(String(i.text).replace(/@/g, '@\u200B').replace(/<qqbot-/g, '<qqbot-\u200B'))
+          // 转发节点在 Markdown 中同样独占一行；多段最终 join('') 拼接，需显式补换行，
+          // 否则转发内容拍平后会挤成一行
+          if (i.text) {
+            let forwardText = String(i.text).replace(/@/g, '@\u200B').replace(/<qqbot-/g, '<qqbot-\u200B')
+            if (i.type === 'forward' && !forwardText.endsWith('\n')) forwardText += '\n'
+            content.push(forwardText)
+          }
           break
         case 'at':
           if (!e?.group_id) break
