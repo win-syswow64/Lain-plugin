@@ -15,6 +15,7 @@ import { prepareAudioUpload } from './Audio.js'
 import QQBotIdMap from '../../model/qqbot-id-map.js'
 import { installQQBotAPIPolicy, normalizeRestrictedAPIError, withQQBotAPIContext, reportQQBotAPIError, getQQBotAPIErrorCode } from './APIPolicy.js'
 import ImageMaterials, { IMAGE_MATERIAL_LIMIT, isMaterialURL } from './ImageMaterials.js'
+import { normalizeImageHostResult } from './ImageHost.js'
 import { convertImageToWebP, withImageScope, createImageScope, clearImageScope, getImageScope } from './ImageConversion.js'
 import GroupMembers from './GroupMembers.js'
 import { atTarget, isAtAll, normalizeMentions } from './Mentions.js'
@@ -1917,6 +1918,10 @@ export default class adapterQQBot {
     const upload = await this.resolveImageUpload(file)
     if (upload.image_animated) return { type: 'image', file: upload.buffer, name: upload.name, animated: true }
     file = upload.buffer
+    const hostedImage = result => {
+      const { url, width, height } = normalizeImageHostResult(result, upload)
+      return this.rememberHostedImage({ type, file: url, width, height })
+    }
     if (this.qqImageHostEnabled && getMessagePolicy(this.config).mode !== 'legacy') {
       try {
         const material = await this.materialsAPI.upload(upload)
@@ -1929,22 +1934,21 @@ export default class adapterQQBot {
     try {
       /** 自定义图床 */
       if (Bot?.imageToUrl) {
-        const { width, height, url } = await Bot.imageToUrl(file)
-        common.mark('Lain-plugin', `使用自定义图床发送图片：${url}`)
-        return this.rememberHostedImage({ type, file: url, width, height })
+        const image = hostedImage(await Bot.imageToUrl(file))
+        common.mark('Lain-plugin', `使用自定义图床发送图片：${image.file} (${image.width}x${image.height})`)
+        return image
       } else if (Bot?.uploadFile) {
         /** 老接口，后续废除 */
-        const url = await Bot.uploadFile(file)
-        common.mark('Lain-plugin', `使用自定义图床发送图片：${url}`)
-        const { width, height } = sizeOf(await Bot.Buffer(file))
+        const image = hostedImage(await Bot.uploadFile(file))
+        common.mark('Lain-plugin', `使用自定义图床发送图片：${image.file} (${image.width}x${image.height})`)
         console.warn('[Bot.uploadFile]接口即将废除，请查看文档更换新接口！')
-        return this.rememberHostedImage({ type, file: url, width, height })
+        return image
       }
       /** ICQQ */
       if (Cfg.ICQQ && lain?.file?.uploadImage) {
-        const { url, width, height } = await lain.file.uploadImage(file)
-        common.mark('Lain-plugin', `使用ICQQ发送图片：${url}`)
-        return this.rememberHostedImage({ type, file: url, width, height })
+        const image = hostedImage(await lain.file.uploadImage(file))
+        common.mark('Lain-plugin', `使用ICQQ发送图片：${image.file}`)
+        return image
       }
     } catch (error) {
       logger.error('[调用错误][自定义图床] 将继续公网发送图片')
@@ -1953,11 +1957,11 @@ export default class adapterQQBot {
 
     try {
       /** QQ图床 预留 */
-      const QQ = Bot[this.id].config.other.QQ
+      const QQ = Bot[this.id]?.config?.other?.QQ
       if (QQ) {
-        const { width, height, url } = await Bot.uploadQQ(file, QQ)
-        common.mark('Lain-plugin', `QQ图床上传成功：${url}`)
-        return this.rememberHostedImage({ type, file: url, width, height })
+        const image = hostedImage(await Bot.uploadQQ(file, QQ))
+        common.mark('Lain-plugin', `QQ图床上传成功：${image.file}`)
+        return image
       }
     } catch (error) {
       logger.error('[调用错误][QQ图床] 将继续公网发送图片')
@@ -1965,9 +1969,9 @@ export default class adapterQQBot {
     }
 
     /** 公网 */
-    const { width, height, url } = await Bot.FileToUrl(file)
-    common.mark('Lain-plugin', `使用公网临时服务器：${url}`)
-    return this.rememberHostedImage({ type, file: url, width, height })
+    const image = hostedImage(await Bot.FileToUrl(file))
+    common.mark('Lain-plugin', `使用公网临时服务器：${image.file}`)
+    return image
   }
 
   markdownImageURL (url) {
