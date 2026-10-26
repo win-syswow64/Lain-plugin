@@ -18,7 +18,8 @@ import ImageMaterials, { IMAGE_MATERIAL_LIMIT, isMaterialURL } from './ImageMate
 import { normalizeImageHostResult } from './ImageHost.js'
 import { convertImageToWebP, withImageScope, createImageScope, clearImageScope, getImageScope } from './ImageConversion.js'
 import GroupMembers from './GroupMembers.js'
-import { atTarget, isAtAll, normalizeMentions } from './Mentions.js'
+import { atTarget, isAtAll, normalizeMentions, hasAllMention, normalizeAllMentions } from './Mentions.js'
+import { withGroupAtAllLimit, sendWithAtAllLimit } from './AtAll.js'
 import { getMessagePolicy, getMessageVariants, getSmallSetting, withMicroKeyboard, isQQImageHostEnabled } from './MessagePolicy.js'
 import { recordQQBotCount, readQQBotCount } from '../../model/qqbot-dau.js'
 import { DIRECT_UPLOAD_LIMIT, HARD_UPLOAD_LIMIT, getUploadFileType, downloadUploadFile } from './UploadPolicy.js'
@@ -2454,6 +2455,20 @@ export default class adapterQQBot {
   }
 
   async sendQQBotContentWithImages (targetType, targetId, content, context = {}) {
+    content = normalizeAllMentions(content, targetType === 'group')
+    const send = () => this.sendQQBotPreparedContent(targetType, targetId, content, context)
+    if (targetType !== 'group' || !hasAllMention(content)) return await send()
+    targetId = await this.resolveOpenid(targetId, 'group')
+    return await withGroupAtAllLimit(this.id, targetId, async () => {
+      const state = await this.getGroupBotState(targetId, { fresh: true, required: false })
+      if (state && !['admin', 'owner'].includes(state.member_role)) {
+        throw new Error('QQBot @全体成员发送失败：机器人需要该群管理员权限')
+      }
+      return await send()
+    })
+  }
+
+  async sendQQBotPreparedContent (targetType, targetId, content, context = {}) {
     const prepared = await this.prepareMarkdownUploads(targetType, targetId, content)
     content = prepared.message
     context = { ...context, uploads: prepared.uploads, resolved: prepared.resolved }
@@ -2484,7 +2499,7 @@ export default class adapterQQBot {
             break
           } catch (error) {
             lastError = error
-            if (error.qqbot_material_final || error.qqbot_whitelist_denied) throw error
+            if (error.qqbot_material_final || error.qqbot_whitelist_denied || error.qqbot_at_all_final) throw error
             // Do not retry a timeout: the platform may already have accepted the message.
             if (!error.response && /timeout|timed out|ECONNRESET|ETIMEDOUT/i.test(error.message || '')) throw error
           }
@@ -2513,6 +2528,7 @@ export default class adapterQQBot {
   }
 
   async sendQQBotContentRequest (targetType, targetId, content, context) {
+    content = normalizeAllMentions(content, targetType === 'group')
     const media = content.find(item => ['image', 'audio', 'video'].includes(item.type))
     if (media && !content.some(item => ['markdown', 'keyboard'].includes(item.type))) {
       const endpoint = `/v2/${targetType}s/${encodeURIComponent(targetId)}`
@@ -2526,19 +2542,22 @@ export default class adapterQQBot {
         if (resolved.buffer.length > DIRECT_UPLOAD_LIMIT) context.resolved?.delete(file)
       }
       const text = content.map(item => item.type === 'text' ? item.text || '' : item.type === 'at' && targetType === 'group'
-        ? `<@${isAtAll(item) ? 'all' : atTarget(item)}>` : '').join('')
+        ? `<@${this.stripQQBotId(atTarget(item))}>` : '').join('')
       const payload = { content: text, msg_type: 7, media: { file_info: uploaded.file_info }, msg_seq: nextQQBotMessageSeq() }
       if (context.messageId) payload.msg_id = context.messageId
       else if (context.eventId) payload.event_id = context.eventId
-      const { data } = await this.sdk.request.post(`${endpoint}/messages`, payload)
-      return data
+      return await sendWithAtAllLimit(this.id, targetType, targetId, content, async () => {
+        const { data } = await this.sdk.request.post(`${endpoint}/messages`, payload)
+        return data
+      })
     }
     const send = targetType === 'group' ? this.sdk.sendGroupMessage.bind(this.sdk) : this.sdk.sendPrivateMessage.bind(this.sdk)
-    // 旧 SDK 把 at(all) 编码成 <@everyone>，QQ群官方协议使用 <@all>。
+    // 不交给旧 SDK 编码全体成员；新版文本与 Markdown 均使用官方标签。
     const normalized = content.filter(item => targetType === 'group' || item.type !== 'at').map(item => item.type === 'at' && targetType === 'group'
-      ? { type: 'text', text: `<@${isAtAll(item) ? 'all' : this.stripQQBotId(atTarget(item))}>` } : item)
+      ? { type: 'text', text: `<@${this.stripQQBotId(atTarget(item))}>` } : item)
     const pieces = context.eventId && !context.messageId ? [{ type: 'reply', event_id: context.eventId }, ...normalized] : normalized
-    return await send(encodeURIComponent(targetId), pieces, context.messageId ? { id: context.messageId } : undefined)
+    return await sendWithAtAllLimit(this.id, targetType, targetId, content,
+      () => send(encodeURIComponent(targetId), pieces, context.messageId ? { id: context.messageId } : undefined))
   }
 
   /** Markdown images over 5MiB also pass through official multipart upload. */

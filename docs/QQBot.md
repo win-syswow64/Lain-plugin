@@ -198,7 +198,11 @@ await e.reply([segment.at('all'), ' 请查看群通知'])
 // 也接受 { type: 'at', qq: 'all' }、id: 'all'、user_id: 'all'。
 ```
 
-Markdown 使用 `<qqbot-at-everyone />`；普通文本/媒体消息统一使用 `<@all>`。私聊不会发送群 @ 指令。实际是否允许提醒全体成员仍由 QQ 的群权限和平台规则决定。
+依据官方 [2026-10-26 更新记录](https://bot.q.qq.com/wiki/develop/api-v2/changelog.html#_20261026)，群聊的普通文本和 Markdown 都使用 `<qqbot-at-everyone />`，机器人需要是该群管理员，每群每天只能发送一次。适配器将 ICQQ 的 `segment.at('all')`、`qq/id/user_id: 'all'` 及旧的 `<@all>` / `<@everyone>` 统一转换为该标签。私聊不发送全体提醒，也不消耗群额度。
+
+发送前使用本地 Redis 校验并预占额度，按同一 AppID、官方群 OpenID 和北京时间自然日记录，次日 00:00 自动过期。QQ 号、带 AppID 前缀的 ID 会先解析为同一群 OpenID；并发调用、多个共用 Redis 的进程、主动消息、被动回复、按钮回调、raw / legacy / 模板模式共用记录，不会通过切换格式或身份转译绕过限制。日额度与在途互斥锁分别保存，跨午夜的请求也不会并发重复发送。只有实际正文、`at` 消息段或 Markdown 模板参数中的全体提醒参与计数；按钮标签和回调数据不会计数。
+
+额度已使用时在本地报错，不向 QQ 再提交含全体提醒的消息。明确发送失败会返还预占额度；成功、超时或未返回消息 ID 等无法确认是否送达的情况保留额度，避免重试造成重复提醒。Redis 不可用时停止发送并提示检查本地冷却记录，不回退到可被重启清空的内存计数。适配器会尝试通过可选的群状态接口检查机器人角色；接口不可用时仍由发送接口执行官方权限检查。
 
 事件结构参考官方[群 @机器人消息](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_at_message_create.html)和[群全量消息](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_message_create.html)。
 
