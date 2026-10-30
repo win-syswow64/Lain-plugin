@@ -2830,11 +2830,12 @@ export default class adapterQQBot {
   async sendReplyWithImages(e, msg) {
     if (typeof msg === 'string' && msg.includes('歌曲分享失败：')) return false
     let res
-    const { Pieces } = await this.getQQBot(msg, e)
+    const { Pieces, reply } = await this.getQQBot(msg, e)
 
     for (const i in Pieces) {
       if (!Pieces[i] || Object.keys(Pieces[i]).length === 0) continue
-      let { ok, data, error } = await this.sendMsg(e, Pieces[i])
+      const piece = reply ? [...Pieces[i], reply] : Pieces[i]
+      let { ok, data, error } = await this.sendMsg(e, piece)
       if (ok) { res = data; continue }
 
       throw error || new Error(data)
@@ -2849,7 +2850,8 @@ export default class adapterQQBot {
       logger.debug('发送回复消息：', JSON.stringify(msg))
       const replyId = e.qqbot_message_id || e.message_id || e.data?.id
       const source = { messageId: replyId }
-      if (replyId) msg = Array.isArray(msg) ? [{ type: 'reply', id: replyId }, ...msg] : [{ type: 'reply', id: replyId }, msg]
+      // msg_id 是被动回复凭据；只有插件显式传入 reply 段才生成引用展示。
+      // 自动插入 reply 会让图文卡片比 shareMusic 多出 message_reference。
       if (!e.friend) {
         return { ok: true, data: await this.sendQQBotPiece('group', e.group_openid || e.data?.group_openid || e.data?.group_id, msg, source) }
       } else {

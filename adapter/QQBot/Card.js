@@ -1,7 +1,7 @@
 import fetch from 'node-fetch'
 
 const platforms = { qq: 'QQ音乐', '163': '网易云音乐', migu: '咪咕音乐', kugou: '酷狗音乐', kuwo: '酷我音乐' }
-const aliases = { qqmusic: 'qq', netease: '163', neteasecloud: '163' }
+const aliases = { qqmusic: 'qq', netease: '163', neteasecloud: '163', kugo: 'kugou' }
 
 function shareJSON (item) {
   if (item?.type !== 'json') return null

@@ -225,6 +225,8 @@ await Bot['机器人AppID'].sendPrivateCard('用户OpenID或已绑定QQ', card)
 
 `e.replyCard(card, options)`、群/好友的 `sendCard(card, options)`、Bot 级的 `sendGroupCard(id, card, source)` / `sendPrivateCard(id, card, source)` 支持 `messageId`、`msgId`、`eventId` 与 `message_reference`。`msg_id` 优先于 `event_id`；引用展示可用 `message_reference: { message_id: 'REFIDX_...' }`，或 `messageReference` 同义选项。`Bot['AppID'].pickGroup()` / `Bot['AppID'].pickFriend()` 在消息上下文外取得的对象按主动发送处理。使用官方图文结构的消息不会因账号配置为 raw、legacy 或模板模式而转换成 Markdown。
 
+`e.reply()` 发送音乐/图文消息段与 `shareMusic()` 共用图文卡片接口。普通回复只携带 `msg_id`，不会自动添加 `message_reference`；被动回复凭据与客户端引用展示是两个独立字段。只有显式传入 `reply` 消息段或上述引用选项时才添加引用字段。群聊引用 ID 应从入站事件的 `message_scene.ext[].msg_idx` 或发送响应的 `ext_info.ref_idx` 获取，不要直接把被动回复的 `msg_id` 当作引用 ID。客户端出现“请使用新版手机QQ进行查看”时，转换日志只记录卡片正文，不能据此确认最终请求的上下文或客户端渲染结果。
+
 ### ICQQ 风格的分享接口
 
 群和好友对象都提供 `shareUrl(content, config)`、`shareMusic(platform, id, details)`；额外的 ICQQ 分享应用配置不传给官方图文接口。
@@ -251,7 +253,7 @@ await target.shareMusic('custom', '', {
 })
 ```
 
-支持 `qq`、`163`、`migu`、`kugou`、`kuwo`；`qqmusic`、`netease`、`neteasecloud` 分别映射到 QQ 音乐和网易云音乐。也支持 `shareMusic({ title, singer, url, image })`。传入完整的标题、页面和封面时直接使用提供的资料，不访问音乐站点；未提供完整资料时按歌曲 ID 查询公开元数据，查询失败或缺少封面会明确报错，可改传完整资料。查询逻辑沿用已安装 ICQQ 的元数据接口，省略音频和 vkey 请求，音乐站点接口变化可能影响按 ID 查询。
+支持 `qq`、`163`、`migu`、`kugou`、`kuwo`；`qqmusic`、`netease`、`neteasecloud` 分别映射到 QQ 音乐和网易云音乐，兼容 `kugo` 作为 `kugou` 的别名。也支持 `shareMusic({ title, singer, url, image })`。传入完整的标题、页面和封面时直接使用提供的资料，不访问音乐站点；未提供完整资料时按歌曲 ID 查询公开元数据，查询失败或缺少封面会明确报错，可改传完整资料。查询逻辑沿用已安装 ICQQ 的元数据接口，省略音频和 vkey 请求，音乐站点接口变化可能影响按 ID 查询。
 
 兼容输入字段映射如下：
 
