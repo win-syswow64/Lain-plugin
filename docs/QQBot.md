@@ -186,6 +186,104 @@ if (response.data) console.log(response.data.group_name)
 
 参考官方[机器人加入群聊](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_add_robot.html)、[机器人退出群聊](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_del_robot.html)、[群成员加入](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_member_add.html)和[群成员退出](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_member_remove.html)。
 
+## 图文卡片与 ICQQ 分享接口
+
+官方 [2026-10-28 更新记录](https://bot.q.qq.com/wiki/develop/api-v2/changelog.html#_20261028)增加群聊、单聊图文卡片。适配器通过消息接口发送 `msg_type: 8`，使用 `card: { type: 'tuwen', content: {...} }`。字段限制见[群聊消息接口](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html#schema-messagecard)和[单聊消息接口](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_messages.post.html#schema-messagecard)。
+
+| 字段 | 必填 | 要求 |
+| --- | --- | --- |
+| `title` | 是 | 1～50 个字符 |
+| `description` | 是 | 1～200 个字符 |
+| `url` | 是 | 点击卡片打开的 HTTPS 链接，最多 1024 个字符 |
+| `pic_url` | 是 | 公网可访问的 HTTPS 封面链接，最多 1024 个字符 |
+
+图文卡片没有 `audio` 或其他媒体字段。音乐分享通过标题、歌手、歌曲页面和封面组成图文卡片，点击后打开歌曲页面；卡片中没有音频播放功能。兼容输入里的 `audio`、`musicUrl` 不参与请求，也不会用于下载或上传语音。需要发送 MP3 等音频时，单独使用 `segment.record()` 或 `audio` 消息段。
+
+### 独立图文卡片接口
+
+```js
+const card = {
+  title: '本周活动',
+  description: '查看活动说明与参与方式',
+  url: 'https://example.com/events',
+  pic_url: 'https://example.com/events-cover.jpg'
+}
+
+// 群消息、C2C 私聊以及按钮回调都可直接回复。
+await e.replyCard(card)
+
+// 原生 QQBot 事件对象中的接口自动沿用入站消息或互动事件的回复上下文。
+if (e.isGroup || e.group_id) await e.group.sendCard(card)
+else await e.friend.sendCard(card)
+
+// 主动发送；群聊需已开启主动推送。
+await Bot['机器人AppID'].sendGroupCard('群OpenID或已绑定群号', card)
+await Bot['机器人AppID'].sendPrivateCard('用户OpenID或已绑定QQ', card)
+```
+
+`sendCard` 也接受官方完整结构 `{ type: 'tuwen', content: card }`。独立接口会严格校验上述字段，缺失、超长、非 HTTPS 链接会在请求前报错。封面直接使用 `pic_url`，不走 Markdown 图片素材、WebP 转换或文件分片上传；本地文件、Buffer、base64 和 `qqbot-media://` 不能作为 `pic_url`。
+
+`e.replyCard(card, options)`、群/好友的 `sendCard(card, options)`、Bot 级的 `sendGroupCard(id, card, source)` / `sendPrivateCard(id, card, source)` 支持 `messageId`、`msgId`、`eventId` 与 `message_reference`。`msg_id` 优先于 `event_id`；引用展示可用 `message_reference: { message_id: 'REFIDX_...' }`，或 `messageReference` 同义选项。`Bot['AppID'].pickGroup()` / `Bot['AppID'].pickFriend()` 在消息上下文外取得的对象按主动发送处理。使用官方图文结构的消息不会因账号配置为 raw、legacy 或模板模式而转换成 Markdown。
+
+### ICQQ 风格的分享接口
+
+群和好友对象都提供 `shareUrl(content, config)`、`shareMusic(platform, id, details)`；额外的 ICQQ 分享应用配置不传给官方图文接口。
+
+```js
+const target = e.group || e.friend
+await target.shareUrl({
+  title: '活动公告',
+  summary: '点击查看活动规则',
+  url: 'https://example.com/events',
+  image: 'https://example.com/events-cover.jpg'
+})
+
+// 与 ICQQ 调用形式相同，查询歌曲元数据后组成卡片，不查询音频播放地址。
+await target.shareMusic('qq', '歌曲ID')
+await target.shareMusic('163', '歌曲ID')
+
+// 与 OneBot 自定义音乐资料兼容，无需歌曲 ID 或 audio。
+await target.shareMusic('custom', '', {
+  title: '歌曲名',
+  singer: '歌手名',
+  url: 'https://example.com/song',
+  image: 'https://example.com/song-cover.jpg'
+})
+```
+
+支持 `qq`、`163`、`migu`、`kugou`、`kuwo`；`qqmusic`、`netease`、`neteasecloud` 分别映射到 QQ 音乐和网易云音乐。也支持 `shareMusic({ title, singer, url, image })`。传入完整的标题、页面和封面时直接使用提供的资料，不访问音乐站点；未提供完整资料时按歌曲 ID 查询公开元数据，查询失败或缺少封面会明确报错，可改传完整资料。查询逻辑沿用已安装 ICQQ 的元数据接口，省略音频和 vkey 请求，音乐站点接口变化可能影响按 ID 查询。
+
+兼容输入字段映射如下：
+
+| 兼容输入 | 官方字段 |
+| --- | --- |
+| `title` | `title` |
+| `description`、`summary`、`desc`、`singer`、字符串 `content` | `description`，缺省使用标题 |
+| `url`、`jumpUrl` | `url` |
+| `pic_url`、`image`、`preview`、`pic` | `pic_url` |
+
+兼容入口会截取超长的标题/描述，并将 HTTP 页面、封面地址升级为 HTTPS。原网站须实际支持 HTTPS；不支持时应提供可用的 HTTPS 地址。机器人身份转译为 ICQQ 后，事件里的这些分享方法仍由 QQBot 发送，群 OpenID 和被动回复上下文都会保留。
+
+### 分享消息段
+
+`e.reply()`、`e.markdown()`、普通群/好友发送也支持以下对象，以及 ICQQ 的扁平消息段和 OneBot 的嵌套 `data` 消息段：
+
+```js
+await e.reply({ type: 'card', card: { type: 'tuwen', content: card } })
+await e.reply({ type: 'tuwen', content: card })
+await e.reply({ type: 'share', url: card.url, title: card.title, content: card.description, image: card.pic_url })
+await e.reply({ type: 'music', platform: 'qq', id: '歌曲ID' })
+await e.reply({ type: 'music', data: { type: '163', id: '歌曲ID' } })
+await e.reply({ type: 'music', data: {
+  type: 'custom', title: '歌曲名', content: '歌手名',
+  url: 'https://example.com/song', image: 'https://example.com/song-cover.jpg'
+} })
+```
+
+ICQQ 常见 `com.tencent.structmsg` / `com.tencent.qzone.structmsg` JSON 分享中的 `meta.news`、`meta.music` 也会按这些字段转换。其他 JSON、XML 或任意 Ark 不会自动解释为图文卡片。
+
+卡片独立发送；与其他消息段混合时按片段顺序拆分。仅卡片回复不会自动附加通用按钮或额外的空白 Markdown；显式按钮仍作为独立消息发送。成功发送计入消息与图片统计并写入消息缓存，后续可使用原有撤回接口。权限拒绝、无效参数、超时等异常向调用插件抛出，不把卡片降级为带播放器的音乐分享或自动重复发送。
+
 ## @全体成员
 
 接收到官方群消息中的 `<@all>` 时，适配器生成 ICQQ 消息段 `{ type: 'at', qq: 'all', text: '@全体成员' }`，同时设置 `e.atall = true`。其他消息的 `atall` 为 false。身份转换后仍保留此消息段，不会把 `all` 当作 QQ 号绑定。

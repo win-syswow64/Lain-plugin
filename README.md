@@ -61,18 +61,6 @@ git -C plugins/button status
 
 撤回测试已统一：引用机器人消息发送 `#撤回`（或 `#引用撤回`）；发送 `#测试撤回` 会发送一条测试消息并撤回，带引用时则撤回引用消息。`#QQBot测试撤回` 和 `#QQBot撤回测试` 保留为别名。群聊、私聊及各适配器统一调用 ICQQ 风格的 `recallMsg`；适配器不支持或平台拒绝撤回时会回复失败原因。
 
-## ws-plugin 兼容补丁
-
-`ws-plugin/` 和 `22009-plugin/` 已从 Lain-plugin 的 Git 跟踪中移除，并由 `.gitignore` 忽略。已有本地目录及各自的 `.git` 保留，今后独立更新和提交；本体不保存它们的子模块指针或插件文件。`patches/ws-plugin-qqbot.patch` 仍保存本项目所需的兼容改动：OneBot 普通发送接口按主动发送处理，补齐文件消息段，并从本地绑定记录返回 QQBot 群成员列表。需要在独立安装的 `Miao-Yunzai/plugins/ws-plugin` 使用这些改动时，在 `Miao-Yunzai` 根目录运行：
-
-```bash
-cd plugins/ws-plugin
-git apply --check ../Lain-plugin/patches/ws-plugin-qqbot.patch
-git apply ../Lain-plugin/patches/ws-plugin-qqbot.patch
-```
-
-补丁基于 ws-plugin 提交 `2c814ab2e3897260d15230c4c5512312e0d447e7` 制作；若上游版本不同，先检查补丁是否仍可应用。已应用过补丁的工作区不需重复执行。
-
 ## 常用指令
 
 - `#设置主人`：按控制台验证码设置主人；已有主人可用 `#设置主人@用户` 指定其他主人。
@@ -83,4 +71,4 @@ git apply ../Lain-plugin/patches/ws-plugin-qqbot.patch
 
 ## 致谢
 
-[Miao-Yunzai](https://github.com/yoimiya-kokomi/Miao-Yunzai)、[原 Lain-plugin](https://github.com/Circle-money-run/Lain-plugin)、[QQBot 按钮库](https://gitee.com/lava081/button)、[ws-plugin](https://gitee.com/xiaoye12123/ws-plugin)、[OpenShamrock](https://github.com/whitechi73/OpenShamrock)、[LLOneBot](https://github.com/LLOneBot/LLOneBot)、[Lagrange.Core](https://github.com/LagrangeDev/Lagrange.Core)、[Yunzai-Kook-Plugin](https://github.com/TimeRainStarSky/Yunzai-KOOK-Plugin)、[XZhouQD-Lain](https://github.com/XZhouQD/Lain-plugin) 及其他贡献者。
+[Miao-Yunzai](https://github.com/yoimiya-kokomi/Miao-Yunzai)、[原 Lain-plugin](https://github.com/Circle-money-run/Lain-plugin)、[ws-plugin](https://gitee.com/xiaoye12123/ws-plugin)、[OpenShamrock](https://github.com/whitechi73/OpenShamrock)、[LLOneBot](https://github.com/LLOneBot/LLOneBot)、[Lagrange.Core](https://github.com/LagrangeDev/Lagrange.Core)、[Yunzai-Kook-Plugin](https://github.com/TimeRainStarSky/Yunzai-KOOK-Plugin)、[XZhouQD-Lain](https://github.com/XZhouQD/Lain-plugin) 及其他贡献者。

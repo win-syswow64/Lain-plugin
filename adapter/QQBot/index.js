@@ -20,6 +20,7 @@ import { convertImageToWebP, withImageScope, createImageScope, clearImageScope, 
 import GroupMembers from './GroupMembers.js'
 import { atTarget, isAtAll, normalizeMentions, hasAllMention, normalizeAllMentions } from './Mentions.js'
 import { withGroupAtAllLimit, sendWithAtAllLimit } from './AtAll.js'
+import QQBotCards, { isCardMessage } from './Card.js'
 import { getMessagePolicy, getMessageVariants, getSmallSetting, withMicroKeyboard, isQQImageHostEnabled } from './MessagePolicy.js'
 import { recordQQBotCount, readQQBotCount } from '../../model/qqbot-dau.js'
 import { DIRECT_UPLOAD_LIMIT, HARD_UPLOAD_LIMIT, getUploadFileType, downloadUploadFile } from './UploadPolicy.js'
@@ -144,6 +145,8 @@ export default class adapterQQBot {
       getGuildList: () => Bot[this.id].tl,
       // 与 OneBotV11 适配器保持一致：此入口始终是主动私聊发送。
       sendPrivateMsg: async (userId, msg) => await this.sendFriendMsg(userId, msg),
+      sendGroupCard: (groupId, card, source) => this.sendCard('group', groupId, card, source),
+      sendPrivateCard: (userId, card, source) => this.sendCard('user', userId, card, source),
       /** 从 QQBot 半天消息缓存中读取消息，兼容 ICQQ 的 getMsg。 */
       getMsg: async (messageId) => await this.getCachedMessageById(messageId),
       readMsg: async () => common.recvMsg(this.id, 'QQBot', true),
@@ -388,7 +391,12 @@ export default class adapterQQBot {
     return this.imageMaterials ||= new ImageMaterials(this)
   }
 
-  pickGroup(groupID) {
+  get cardsAPI () {
+    return this.cardMessages ||= new QQBotCards(this)
+  }
+
+  pickGroup(groupID, source = {}) {
+    const cardSource = typeof source === 'string' ? { messageId: source } : (source || {})
     return {
       group_id: this.formatQQBotId(groupID),
       /** 查询机器人在群内是否为管理员；群主同时视为管理员。 */
@@ -403,6 +411,9 @@ export default class adapterQQBot {
       },
       recallMsg: async (msg_id) => await this.recallGroupMsg(groupID, msg_id),
       sendMsg: async (msg) => await this.sendGroupMsg(groupID, msg),
+      sendCard: (card, options = {}) => this.sendCard('group', groupID, card, { ...cardSource, ...options }),
+      shareUrl: content => this.sendCard('group', groupID, { type: 'share', data: content }, cardSource),
+      shareMusic: (platform, id, details) => this.sendMusicCard('group', groupID, platform, id, details, cardSource),
       makeForwardMsg: async (data) => await common.makeForwardMsg(data),
       getMsg: async (msg_id) => await this.getCachedMessage('group', groupID, msg_id),
       getChatHistory: async (msg_id, num = 1) => await this.getCachedChatHistory('group', groupID, msg_id, num),
@@ -454,6 +465,9 @@ export default class adapterQQBot {
     const sourceEventId = source.eventId || ''
     return {
       sendMsg: async (msg) => await this.sendFriendMsg(userId, msg, { messageId: sourceMessageId, eventId: sourceEventId }),
+      sendCard: (card, options = {}) => this.sendCard('user', userId, card, { messageId: sourceMessageId, eventId: sourceEventId, ...options }),
+      shareUrl: content => this.sendCard('user', userId, { type: 'share', data: content }, { messageId: sourceMessageId, eventId: sourceEventId }),
+      shareMusic: (platform, id, details) => this.sendMusicCard('user', userId, platform, id, details, { messageId: sourceMessageId, eventId: sourceEventId }),
       recallMsg: async (msg_id) => await this.recallPrivateMsg(userId, msg_id),
       makeForwardMsg: async (data) => await common.makeForwardMsg(data),
       getMsg: async (msg_id) => await this.getCachedMessage('user', userId, msg_id),
@@ -1402,6 +1416,11 @@ export default class adapterQQBot {
     })
     e.replyMarkdown = e.markdown
     e.sendMarkdown = e.markdown
+    e.replyCard = (card, options = {}) => this.sendCard(isGroup ? 'group' : 'user', isGroup ? rawGroupId : senderOpenid, card, {
+      messageId: e.qqbot_message_id || e.message_id || data.id,
+      eventId: e.qqbot_event_id,
+      ...options
+    })
     /** 快速撤回 */
     e.recall = async () => isGroup
       ? await this.recallGroupMsg(rawGroupId, e.message_id || data.id)
@@ -1424,7 +1443,7 @@ export default class adapterQQBot {
       e.member.is_owner = memberRole === 'owner'
       e.member.is_admin = memberRole === 'admin' || memberRole === 'owner'
       e.group_name = `${this.id}-${e.group_id}`
-      e.group = this.pickGroup(e.group_id)
+      e.group = this.pickGroup(e.group_id, { messageId: e.qqbot_message_id || e.message_id || data.id, eventId: e.qqbot_event_id })
       e.message_type = 'group'
       e.sub_type = 'normal'
     } else {
@@ -1815,6 +1834,14 @@ export default class adapterQQBot {
         case 'reply':
           reply = i
           break
+        case 'card':
+        case 'tuwen':
+        case 'share':
+        case 'music':
+        case 'json':
+          await flushMarkdown()
+          appendMedia(isCardMessage(i) ? { type: 'card', card: await this.cardsAPI.prepare(i) } : i)
+          break
         case 'video':
         case 'record':
         case 'audio':
@@ -1876,6 +1903,7 @@ export default class adapterQQBot {
   async hasAutoButtonContent (data) {
     for (const item of common.array(data)) {
       if (!item) continue
+      if (isCardMessage(item)) continue
       if (['reply', 'at', 'small', 'micro', 'keyboard', 'button', 'file', 'video', 'audio', 'record'].includes(item.type)) continue
       if (item.type === 'image') {
         const file = item.url || item.file
@@ -2124,7 +2152,7 @@ export default class adapterQQBot {
     if (typeof options.content === 'string') return options.content
     if (typeof data === 'string') return data
     if (data?.type === 'markdown') data = data.data || data
-    if (typeof data?.content === 'string') return data.content
+    if (typeof data?.content === 'string' && !isCardMessage(data)) return data.content
     if (Array.isArray(data?.params)) return data.params.flatMap(i => i.values || []).join('\r')
 
     const msg = common.array(data)
@@ -2178,6 +2206,15 @@ export default class adapterQQBot {
           options.mediaAttachments.push(i.type === 'record' || i.type === 'audio'
             ? await this.getAudio(i.file || i.url, i.name) : { ...i, file: i.file || i.url || i.data?.file })
           break
+        case 'card':
+        case 'tuwen':
+        case 'share':
+        case 'music':
+        case 'json':
+          if (!isCardMessage(i)) break
+          if (!options.mediaAttachments) throw new Error('图文卡片需要通过完整消息入口或 sendCard 发送')
+          options.mediaAttachments.push({ type: 'card', card: await this.cardsAPI.prepare(i) })
+          break
         default:
           if (typeof i === 'string') content.push(i)
           break
@@ -2188,6 +2225,33 @@ export default class adapterQQBot {
   }
 
   async makeMarkdownMessage(e, data, options = {}) {
+    const parts = common.array(data)
+    if (typeof options.content !== 'string' && parts.some(isCardMessage)) {
+      const message = []
+      let pending = []
+      const flush = async () => {
+        if (!pending.length) return
+        message.push(...await this.makeMarkdownMessage(e, pending, { ...options, buttons: undefined, button: undefined }))
+        pending = []
+      }
+      for (const item of parts) {
+        if (!isCardMessage(item)) { pending.push(item); continue }
+        await flush()
+        message.push({ type: 'card', card: await this.cardsAPI.prepare(item) })
+      }
+      await flush()
+      const rows = this.normalizeButtons(e, options.buttons || options.button)
+      if (rows.length) {
+        const last = message[message.length - 1]
+        if (last?.type === 'keyboard') last.content.rows = [...last.content.rows, ...rows].slice(0, 5)
+        else {
+          if (last?.type !== 'markdown') message.push({ type: 'markdown', content: ' ' })
+          message.push({ type: 'keyboard', content: { rows } })
+        }
+      }
+      const small = getSmallSetting(options) ?? getSmallSetting(e) ?? getMessagePolicy(this.config).small
+      return withMicroKeyboard(message, small).map(item => item.type === 'keyboard' ? { ...item, small } : item)
+    }
     const mediaAttachments = []
     const markdown = await this.makeMarkdownSegment(e, data, { ...options, mediaAttachments })
     const inlineCommands = this.extractMqqapiInlineCommands(markdown.content)
@@ -2434,6 +2498,39 @@ export default class adapterQQBot {
     return this.returnResult(await this.sendRichFile('user', userId, file, name, source))
   }
 
+  /** 官方图文卡片只发送四个图文字段，不使用旧 SDK 的 Markdown/音乐序列化。 */
+  async sendCard (targetType, targetId, input, source = {}) {
+    if (!['group', 'user'].includes(targetType)) throw new Error('QQBot 图文卡片仅支持群聊和单聊')
+    const context = typeof source === 'string' ? { messageId: source } : (source || {})
+    targetId = await this.resolveOpenid(targetId, targetType === 'group' ? 'group' : 'private')
+    const messageId = context.messageId || context.msgId || context.id || ''
+    const eventId = context.eventId || ''
+    if (targetType === 'group' && !messageId && !eventId) {
+      const state = await this.getGroupBotState(targetId)
+      if (!state.allow_proactive_msg) throw new Error('QQBot 群图文卡片发送失败：该群未开启机器人主动推送')
+    }
+    const card = await this.cardsAPI.prepare(input)
+    const payload = { msg_type: 8, card, msg_seq: nextQQBotMessageSeq() }
+    if (messageId) payload.msg_id = messageId
+    else if (eventId) payload.event_id = eventId
+    const reference = context.message_reference ?? context.messageReference
+    if (reference) {
+      const id = typeof reference === 'string' ? reference : reference.message_id
+      if (typeof id !== 'string' || !id.trim()) throw new Error('QQBot 图文卡片引用需要 message_reference.message_id')
+      payload.message_reference = { message_id: id }
+    }
+    const { data } = await this.sdk.request.post(`/v2/${targetType}s/${encodeURIComponent(targetId)}/messages`, payload)
+    if (!data?.id) throw new Error('QQBot 图文卡片发送失败：响应中没有消息 ID')
+    const message = [{ type: 'card', card }]
+    await this.recordSuccessfulSend(targetType, targetId, message)
+    await this.cacheSentMessage(targetType === 'group' ? 'group' : 'user', targetId, data, message)
+    return this.returnResult(data)
+  }
+
+  async sendMusicCard (targetType, targetId, platform, id, details, source) {
+    return await this.sendCard(targetType, targetId, await this.cardsAPI.music(platform, id, details), source)
+  }
+
   /** 主动发送 OneBot 文件。 */
   async sendGroupFile (groupID, file, name) {
     const state = await this.getGroupBotState(groupID)
@@ -2665,6 +2762,7 @@ export default class adapterQQBot {
   async recordSuccessfulSend (targetType, targetId, content) {
     this.imageMaterials?.touch(content)
     const images = content.reduce((total, item) => total + (item.type === 'image' ? 1 :
+      item.type === 'card' && item.card?.content?.pic_url ? 1 :
       item.type === 'markdown' ? (String(item.content || item.params?.flatMap(p => p.values || []).join('\n') || '').match(/!\[[^\]]*\]\(/g) || []).length : 0), 0)
     await this.send_count(targetType === 'group' ? targetId : '', images)
   }
@@ -2686,7 +2784,29 @@ export default class adapterQQBot {
     const sendSource = sourceEventId
       ? (sourceMessageId ? { messageId: sourceMessageId } : { eventId: sourceEventId })
       : sourceMessageId ? { messageId: sourceMessageId } : {}
+    const reference = context.message_reference ?? context.messageReference ?? reply?.id
+    if (reference) sendSource.message_reference = typeof reference === 'string' ? { message_id: reference } : reference
     let result
+
+    if (parts.some(isCardMessage)) {
+      let pending = []
+      const flush = async () => {
+        if (!pending.length) return
+        const sent = await this.sendQQBotPiece(targetType, targetId, pending, sendSource)
+        result ||= sent
+        pending = []
+      }
+      for (const item of parts) {
+        if (item?.type === 'reply') continue
+        if (!isCardMessage(item)) { pending.push(item); continue }
+        await flush()
+        const sent = await this.sendCard(targetType, targetId, item, sendSource)
+        result ||= sent
+      }
+      await flush()
+      if (!result) throw new Error('QQBot 图文卡片消息内容为空')
+      return result
+    }
 
     for (const file of files) {
       const type = { image: 1, video: 2, audio: 3, record: 3, file: 4 }[file.type]
@@ -2945,7 +3065,7 @@ export default class adapterQQBot {
     this.rememberButtonCommand(data)
 
     if (data.group_id) {
-      data.group = this.pickGroup(groupId)
+      data.group = this.pickGroup(groupId, { eventId: replyEventId })
       common.mark('Lain-plugin', '群按钮点击: [' + data.group_id + ', ' + data.user_id + '] ' + msg)
     } else {
       data.friend = this.pickFriend(data.user_id, { eventId: replyEventId })
@@ -2963,6 +3083,7 @@ export default class adapterQQBot {
     })
     data.replyMarkdown = data.markdown
     data.sendMarkdown = data.markdown
+    data.replyCard = (card, options = {}) => this.sendCard(groupId ? 'group' : 'user', groupId || operatorId, card, { eventId: replyEventId, ...options })
 
     try {
       if (groupId) {

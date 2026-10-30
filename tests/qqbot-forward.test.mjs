@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
 import { atTarget, isAtAll } from '../adapter/QQBot/Mentions.js'
+import { isCardMessage } from '../adapter/QQBot/Card.js'
 import { getMessagePolicy, getMessageVariants, getSmallSetting, withMicroKeyboard } from '../adapter/QQBot/MessagePolicy.js'
 
 // Load the actual methods without starting YunZai, the gateway, or external services.
@@ -32,9 +33,9 @@ const methods = [
   'extractMqqapiInlineCommands (content) {',
   'HandleURL(msg) {'
 ].map(start => extract(source, `  ${start}`, '\n  }')).join('\n')
-const Harness = new Function('common', 'Bot', 'Cfg', 'getSmallSetting', 'getMessagePolicy', 'withMicroKeyboard', 'isAtAll', 'atTarget', `
+const Harness = new Function('common', 'Bot', 'Cfg', 'getSmallSetting', 'getMessagePolicy', 'withMicroKeyboard', 'isAtAll', 'atTarget', 'isCardMessage', `
   return class { ${methods} }
-`)(common, Bot, { WhiteLink: [] }, getSmallSetting, getMessagePolicy, withMicroKeyboard, isAtAll, atTarget)
+`)(common, Bot, { WhiteLink: [] }, getSmallSetting, getMessagePolicy, withMicroKeyboard, isAtAll, atTarget, isCardMessage)
 
 function harness () {
   const adapter = new Harness()

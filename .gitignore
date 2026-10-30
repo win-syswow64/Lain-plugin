@@ -54,7 +54,7 @@ coverage/
 .cache/
 
 *.tar.gz
-button.zip
+button/
 .22009-plugin/
 .ws-plugin/
 /ws-plugin/

@@ -689,7 +689,7 @@ class QQBotIdMap {
       const qqbotGroup = e.group
       e.group = this.mergeApiObject(e.group, pickedGroup)
       // 消息仍来自 QQBot：这些接口必须保留原始 OpenID 场景，不能被原生 ICQQ 覆盖。
-      for (const method of ['recallMsg', 'muteMember', 'getMsg', 'getChatHistory', 'getMemberMap', 'getMemberList',
+      for (const method of ['sendCard', 'shareUrl', 'shareMusic', 'recallMsg', 'muteMember', 'getMsg', 'getChatHistory', 'getMemberMap', 'getMemberList',
         'getMemberInfo', 'getMemberPage', 'pickMember', 'kickMember', 'removeMembers', 'getBlacklist',
         'getBlacklistPage', 'setMemberBlacklist', 'addToBlacklist', 'removeFromBlacklist']) {
         if (typeof qqbotGroup?.[method] === 'function') e.group[method] = qqbotGroup[method].bind(qqbotGroup)
@@ -833,7 +833,7 @@ class QQBotIdMap {
         raw: bot?.adapter || qqbotBot?.adapter
       }
       wrapper.qqbot_bot = qqbotBot || bot?.qqbot_bot || null
-      for (const method of ['pickMember', 'getGroupMemberList', 'getGroupMemberInfo', 'setGroupKick',
+      for (const method of ['sendGroupCard', 'sendPrivateCard', 'pickMember', 'getGroupMemberList', 'getGroupMemberInfo', 'setGroupKick',
         'getGroupMemberPage', 'removeGroupMembers', 'getGroupBlacklist', 'getGroupBlacklistPage', 'setGroupMemberBlacklist']) {
         if (typeof qqbotBot?.[method] === 'function') wrapper[method] = qqbotBot[method].bind(qqbotBot)
       }
