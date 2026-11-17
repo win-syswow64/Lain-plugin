@@ -1,4 +1,5 @@
 import QQBotIdMap from '../../model/qqbot-id-map.js'
+import { profileFields } from './Profiles.js'
 
 /** 官方群成员管理与 ICQQ 返回结构之间的转换。 */
 export default class GroupMembers {
@@ -6,6 +7,7 @@ export default class GroupMembers {
     this.adapter = adapter
     this.cache = new Map()
     this.pending = new Map()
+    this.observed = new Map()
   }
 
   async group (groupId) {
@@ -27,6 +29,7 @@ export default class GroupMembers {
   normalize (groupOpenid, user) {
     const id = String(user.member_openid || '').trim()
     if (!id) throw new Error('QQBot 群成员信息缺少 member_openid')
+    user = { ...user, ...this.observed.get(`${groupOpenid}:${id}`) }
     QQBotIdMap.load()
     const convert = QQBotIdMap.isMemberListConvertEnabled(this.adapter.id, groupOpenid)
     const groupKey = QQBotIdMap.normalizeOpenid(groupOpenid, this.adapter.id)
@@ -41,9 +44,11 @@ export default class GroupMembers {
       user_id: (convert && userQQ) || this.adapter.formatQQBotId(id),
       member_openid: id,
       group_openid: groupOpenid,
-      union_openid: user.union_openid || '',
-      nickname: String(user.username || ''),
-      card: binding?.groups?.[groupKey]?.card || '',
+      union_openid: user.union_openid || binding?.groups?.[groupKey]?.union_openid || binding?.union_openid || '',
+      nickname: String(user.username || binding?.nickname || ''),
+      card: user.member_nickname ?? binding?.groups?.[groupKey]?.card ?? '',
+      member_nickname: user.member_nickname ?? binding?.groups?.[groupKey]?.card ?? '',
+      avatar: user.avatar || binding?.groups?.[groupKey]?.avatar || binding?.avatar || '',
       sex: 'unknown',
       age: 0,
       area: '',
@@ -52,11 +57,63 @@ export default class GroupMembers {
       title: '',
       title_expire_time: 0,
       join_time: Number.isFinite(joined) ? joined : 0,
-      last_sent_time: 0,
+      last_sent_time: user.last_sent_time || 0,
       shutup_time: 0,
       is_robot: user.bot === true,
       update_time: Math.floor(Date.now() / 1000)
     }
+  }
+
+  /** 事件资料不等于完整成员列表；只用于已知成员的即时资料与头像。 */
+  observe (groupOpenid, member, time) {
+    groupOpenid = this.adapter.stripQQBotId(groupOpenid)
+    const id = this.adapter.stripQQBotId(member.member_openid || member.id)
+    if (!groupOpenid || !id) return
+    const key = `${groupOpenid}:${id}`
+    const value = { ...this.observed.get(key), ...profileFields(member), member_openid: id }
+    if (member.joined_at) value.joined_at = member.joined_at
+    if (Number.isFinite(time)) value.last_sent_time = time
+    this.observed.delete(key)
+    this.observed.set(key, value)
+    if (this.observed.size > 5000) this.observed.delete(this.observed.keys().next().value)
+    QQBotIdMap.updateOfficialProfile(this.adapter.id, id, value, groupOpenid)
+    const info = this.normalize(groupOpenid, value)
+    const gml = globalThis.Bot?.[this.adapter.id]?.gml
+    const groupId = this.adapter.formatQQBotId(groupOpenid)
+    if (gml) {
+      if (!gml.has(groupId)) gml.set(groupId, new Map())
+      gml.get(groupId).set(info.user_id, info)
+    }
+    if (typeof info.group_id === 'number' && typeof info.user_id === 'number') {
+      const group = QQBotIdMap.data.groups[this.adapter.id]?.[QQBotIdMap.normalizeOpenid(groupOpenid, this.adapter.id)]
+      const selfId = QQBotIdMap.getBoundBotQQ(this.adapter.id) || group?.qq_self_id
+      const converted = globalThis.Bot?.[selfId]?.gml
+      if (converted) {
+        if (!converted.has(info.group_id)) converted.set(info.group_id, new Map())
+        converted.get(info.group_id).set(info.user_id, info)
+      }
+    }
+    return info
+  }
+
+  forget (groupOpenid, memberOpenid) {
+    groupOpenid = this.adapter.stripQQBotId(groupOpenid)
+    this.cache.delete(groupOpenid)
+    const groupKey = QQBotIdMap.normalizeOpenid(groupOpenid, this.adapter.id)
+    const binding = QQBotIdMap.data.groups[this.adapter.id]?.[groupKey]
+    const selfId = QQBotIdMap.getBoundBotQQ(this.adapter.id) || binding?.qq_self_id
+    const caches = new Set([globalThis.Bot?.[this.adapter.id]?.gml, globalThis.Bot?.[selfId]?.gml])
+    for (const gml of caches) {
+      for (const key of [this.adapter.formatQQBotId(groupOpenid), binding?.group_qq]) {
+        const members = gml?.get(key)
+        if (!memberOpenid) gml?.delete(key)
+        else if (members instanceof Map) for (const [id, info] of members) {
+          if (info.member_openid === this.adapter.stripQQBotId(memberOpenid)) members.delete(id)
+        }
+      }
+    }
+    if (memberOpenid) this.observed.delete(`${groupOpenid}:${this.adapter.stripQQBotId(memberOpenid)}`)
+    else for (const key of this.observed.keys()) if (key.startsWith(`${groupOpenid}:`)) this.observed.delete(key)
   }
 
   async page (groupId, { cursor = '' } = {}) {
@@ -65,6 +122,7 @@ export default class GroupMembers {
       params: cursor ? { cursor: String(cursor) } : {}
     })
     if (!Array.isArray(data?.members)) throw new Error('QQBot 获取群成员列表失败：响应缺少 members')
+    for (const member of data.members) this.observe(groupOpenid, member)
     return data
   }
 
@@ -92,6 +150,7 @@ export default class GroupMembers {
         return [info.user_id, info]
       }))
       this.cache.set(groupOpenid, { members, expires: Date.now() + 30000 })
+      globalThis.Bot?.[this.adapter.id]?.gml?.set(this.adapter.formatQQBotId(groupOpenid), result)
       return result
     })()
     this.pending.set(groupOpenid, pending)
@@ -105,7 +164,19 @@ export default class GroupMembers {
       const info = this.normalize(groupOpenid, member)
       return String(info.user_id) === String(userId) || info.member_openid === this.adapter.stripQQBotId(userId)
     })
-    return member ? this.normalize(groupOpenid, member) : null
+    if (member) return this.normalize(groupOpenid, member)
+    const rawId = this.adapter.stripQQBotId(userId)
+    const binding = QQBotIdMap.normalizeQQ(rawId)
+      ? QQBotIdMap.findUserByQQ(this.adapter.id, rawId, { groupOpenid })
+      : QQBotIdMap.data.users[this.adapter.id]?.[QQBotIdMap.normalizeOpenid(rawId, this.adapter.id)]
+    const groupKey = QQBotIdMap.normalizeOpenid(groupOpenid, this.adapter.id)
+    const memberId = binding?.groups?.[groupKey] ? this.adapter.stripQQBotId(binding.user_openid) : rawId
+    const stored = binding?.groups?.[groupKey]
+    const observed = this.observed.get(`${groupOpenid}:${memberId}`) || (stored ? {
+      member_openid: memberId, member_role: stored.role,
+      member_nickname: stored.card, username: binding.nickname, bot: stored.is_robot
+    } : null)
+    return observed ? this.normalize(groupOpenid, observed) : null
   }
 
   async info (groupId, userId, noCache = false) {
@@ -115,6 +186,7 @@ export default class GroupMembers {
     const member = !noCache && cached?.expires > Date.now() && cached.members.find(item => item.member_openid === memberOpenid)
     if (member) return this.normalize(groupOpenid, member)
     const { data } = await this.adapter.sdk.request.get(`/v2/groups/${encodeURIComponent(groupOpenid)}/members/${encodeURIComponent(memberOpenid)}`)
+    if (data?.member_openid) this.observe(groupOpenid, data)
     const info = this.normalize(groupOpenid, data || {})
     if (cached) {
       const index = cached.members.findIndex(item => item.member_openid === memberOpenid)
@@ -139,7 +211,7 @@ export default class GroupMembers {
       add_to_member_blacklist: block
     })
     if (data?.remove_members_result !== 'success') throw new Error('QQBot 移除群成员失败：接口未返回 success')
-    this.cache.delete(groupOpenid)
+    for (const id of targets) this.forget(groupOpenid, id)
     if (data.add_to_member_blacklist_fail_openids?.length) {
       const error = new Error(`QQBot 已移除群成员，但有 ${data.add_to_member_blacklist_fail_openids.length} 名成员加入黑名单失败`)
       error.qqbot_partial_success = true

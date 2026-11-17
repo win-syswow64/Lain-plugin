@@ -2,7 +2,7 @@
 
 本文按 QQ 机器人官方“启动接入”文档同步，并补充 Lain-plugin 当前支持的群聊、C2C 私聊和配置方式。
 
-> 官方页面显示更新时间为 **2026-07-21**。页面响应的 `Last-Modified` 为 **2026-09-24**；本文于 **2026-10-05** 核对。官方文档：[启动接入](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/getting-started.html)。
+> 本文于 **2026-11-17** 对照官方[变更记录](https://bot.q.qq.com/wiki/develop/api-v2/changelog.html)核对，已适配 **2026-11-16** 的用户资料、昵称、头像、群内昵称及群统一标识更新。接入流程见官方[启动接入](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/getting-started.html)。
 
 ## 官方接入准备
 
@@ -118,6 +118,56 @@ await e.markdown('请选择操作：', {
 有关按钮自动附加、交互类型、mqqapi 内联命令转换，以及自定义底部按钮扩展文件，请看[QQBot 按钮使用与开发](./QQBot-Buttons.md)。
 
 媒体支持服务器可读取的本地文件、Buffer、base64 和公网 URL，由适配器读取后上传到对应的官方接口。音频和视频直接走富媒体上传，不需要先上传公网图床；静态图片可使用官方素材库或配置的图床。音频默认不调用云转码或 FFmpeg，详见下文的 Silk 转码开关。
+
+## 用户、群资料与 ICQQ 兼容字段（2026-11-16）
+
+官方新增 [获取用户基本信息](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_users_user_openid_info.get.html) `GET /v2/users/{user_openid}/info`，返回 `username`、`avatar`、`union_openid` 和 `allow_proactive_msg`。`union_openid` 在绑定第三方应用时有效，未返回时保留空串；主动推送许可是布尔值，`false` 会原样保留，尚未查询时为 `undefined`。
+
+[获取群基本信息](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_info.get.html)新增 `union_group_openid`。群资料同时保留群名、简介、分类、标签和人数，并映射为 ICQQ 的 `group_name`、`group_memo`、`member_count`；官方未提供的群主 QQ 号、人数上限、性别、年龄等字段使用兼容默认值，不推测真实值。
+
+```js
+const bot = Bot['你的AppID']
+
+// 参数可用当前应用的 OpenID，或已建立对应身份绑定的 QQ 号、群号。
+const user = await bot.getUserInfo('C2C用户OpenID')
+const sameUser = await bot.getFriendInfo('C2C用户OpenID')
+const simple = await bot.getStrangerInfo('C2C用户OpenID')
+const group = await bot.getGroupInfo('群OpenID')
+
+// 当前会话对象：getInfo() 默认使用有效查询缓存，renew() 强制刷新。
+if (e.isPrivate) {
+  const info = await e.friend.getInfo()
+  await e.friend.getSimpleInfo()
+  await e.friend.renew()
+  console.log(info.nickname, info.avatar, info.union_openid, info.allow_proactive_msg)
+} else if (e.isGroup) {
+  await e.group.renew()
+  console.log(e.group.name, e.group.info.member_count, e.group.union_group_openid)
+  console.log(e.sender.nickname, e.sender.card, e.member.info.avatar)
+}
+```
+
+Bot 级 `getUserInfo`、`getFriendInfo`、`getStrangerInfo` 共用用户基本信息接口；`getStrangerInfo` 是方法名兼容，不会绕过官方好友关系限制。第二个参数 `true` 可跳过查询缓存，例如 `bot.getGroupInfo(groupId, true)` 或 `friend.getInfo(true)`。群/好友对象的 `.info` 和显示属性读取已知资料，读取本身不发起请求。
+
+| 官方信息来源 | ICQQ / 云崽入口 |
+| --- | --- |
+| 用户资料、消息发送者的 `username` | `sender.nickname`、`friend.nickname`、对应 `.info.nickname` |
+| 群消息发送者的 `member_nickname` | `sender.card`、`member.card`、`member.info.card`；允许空串表示没有群名片 |
+| `avatar` | `sender.avatar`、`friend.info.avatar`、`member.info.avatar`，`getAvatarUrl()` 优先返回官方头像原图 |
+| `union_openid` | `e.union_openid`、`sender.union_openid`、好友/成员 `.info.union_openid` |
+| `union_group_openid` | 群消息/进退群通知的同名字段、`group.union_group_openid`、`group.info.union_group_openid` |
+| 群资料的 `group_member_num` | `group.info.member_count`，同时保留原字段 |
+| 群资料的 `group_finger_memo` | `group.info.group_memo`，同时保留原字段 |
+| 群资料的 `group_class_text`、`group_tags` | `group.info` 中保留同名字段 |
+| 用户资料的 `allow_proactive_msg` | `friend.allow_proactive_msg`、`friend.info.allow_proactive_msg` |
+
+依据官方[单聊事件](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/c2c_message_create.html)、[群 @ 事件](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_at_message_create.html)和[全量群事件](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_message_create.html)，接收消息时直接更新发送者资料，不额外查询用户接口。`mentions` 中的群内昵称用于 `at` 段的显示文字。头像缺失或旧事件返回空昵称时复用已知资料；没有资料时使用原头像规则和空资料。官方头像链接是原图，`getAvatarUrl(size)` 的尺寸参数不会修改它。
+
+启用 ICQQ 身份兼容后，实时官方资料优先于配对得到的旧 ICQQ 事件资料；相关字段也会写入 QQBot 与兼容 Bot 的 `fl`、`gl`、`gml` 缓存，已绑定用户和群的资料会随现有映射文件保存。`gml` 中由事件积累的成员只是已知成员，并不表示完整群成员列表；获取完整列表仍需调用成员列表接口及通过其权限检查。
+
+群成员 OpenID 和 C2C 用户 OpenID 分开使用。数字 QQ 查询用户资料要求有 C2C 绑定，不能用群成员 OpenID 代替。`union_openid` / `union_group_openid` 仅作为关联资料保留，不作为 QQ 号、群号或发送目标，也不会据此自动开启身份转换或绑定其他应用的群。
+
+用户资料查询结果默认缓存 **30 秒**，群资料缓存 **60 秒**，同一对象的并发查询合并为一次请求。官方频率为用户接口 **10 QPS**、群资料接口 **30 QPM**；大量跨对象查询仍须由调用方控制频率，强制刷新不受本地缓存保护。接收资料不延长查询缓存有效期。`40184001` 会报“用户与机器人无好友关系”；`11253` 沿用下文的权限提示；网络错误、限流及不完整响应正常抛出，不返回旧资料伪装查询成功。
 
 ## 白名单接口的异常处理
 

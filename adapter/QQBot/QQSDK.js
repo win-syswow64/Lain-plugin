@@ -295,7 +295,9 @@ export default class QQSDK {
       'notice.friend.increase',
       'notice.friend.decrease',
       'notice.friend.receive_open',
-      'notice.friend.receive_close'
+      'notice.friend.receive_close',
+      'notice.group.receive_open',
+      'notice.group.receive_close'
     ]) {
       QQSDK.wrapNoticeEventId(eventName)
     }
@@ -328,7 +330,11 @@ export default class QQSDK {
 
     const wrapped = function (event, payload) {
       const result = parser.apply(this, [event, payload])
-      if (result && payload?.event_id) result.event_id = payload.event_id
+      if (result) {
+        for (const key of ['event_id', 'group_openid', 'union_group_openid', 'union_openid', 'username', 'avatar']) {
+          if (payload?.[key] !== undefined) result[key] = payload[key]
+        }
+      }
       return result
     }
     wrapped._lainEventIdWrapped = true

@@ -109,6 +109,7 @@ class QQBotIdMap {
     if (groupOpenid) {
       const old = this.data.groups[self_id][groupOpenid] || {}
       this.data.groups[self_id][groupOpenid] = {
+        ...old,
         group_openid: groupOpenid,
         group_qq: groupQQ || old.group_qq || null,
         group_name: group_name || old.group_name || '',
@@ -124,6 +125,7 @@ class QQBotIdMap {
       const groups = old.groups || {}
       if (groupOpenid) {
         groups[groupOpenid] = {
+          ...groups[groupOpenid],
           group_openid: groupOpenid,
           group_qq: groupQQ || groups[groupOpenid]?.group_qq || null,
           qq_self_id: qqSelfId || groups[groupOpenid]?.qq_self_id || null,
@@ -133,6 +135,7 @@ class QQBotIdMap {
       }
 
       this.data.users[self_id][userOpenid] = {
+        ...old,
         user_openid: userOpenid,
         qq: userQQ,
         nickname: nickname || old.nickname || '',
@@ -156,6 +159,44 @@ class QQBotIdMap {
       qq_adapter: qqAdapter,
       saved
     }
+  }
+
+  /** 官方资料只更新已有身份绑定，不根据 union OpenID 创建 QQ 号映射。 */
+  static updateOfficialProfile (selfId, userId, value = {}, groupId = '') {
+    this.load()
+    const groupKey = this.normalizeOpenid(groupId, selfId)
+    const userKey = this.normalizeOpenid(userId, selfId)
+    const group = this.data.groups[selfId]?.[groupKey]
+    const user = this.data.users[selfId]?.[userKey]
+    let changed = false
+    const merge = (target, fields) => {
+      if (!target) return
+      for (const [key, field] of Object.entries(fields)) {
+        if (field === undefined || JSON.stringify(target[key]) === JSON.stringify(field)) continue
+        target[key] = field
+        changed = true
+      }
+    }
+    merge(group, Object.fromEntries(['group_name', 'group_finger_memo', 'group_class_text', 'group_tags',
+      'group_member_num', 'union_group_openid'].filter(key => value[key] !== undefined).map(key => [key, value[key]])))
+    merge(user, {
+      nickname: value.username || undefined,
+      username: value.username || undefined,
+      avatar: value.avatar || undefined,
+      union_openid: value.union_openid || undefined,
+      allow_proactive_msg: typeof value.allow_proactive_msg === 'boolean' ? value.allow_proactive_msg : undefined
+    })
+    if (groupKey && user?.groups?.[groupKey]) {
+      merge(user.groups[groupKey], {
+        card: value.member_nickname,
+        member_nickname: value.member_nickname,
+        role: value.member_role,
+        avatar: value.avatar || undefined,
+        union_openid: value.union_openid || undefined,
+        is_robot: value.bot
+      })
+    }
+    if (changed) this.saveSoon()
   }
 
   static bindBotQQ ({ self_id, qq_self_id }) {
@@ -514,9 +555,23 @@ class QQBotIdMap {
     if (mapping.nickname) {
       if (!e.sender) e.sender = {}
       e.sender.nickname = e.sender.nickname || mapping.nickname
-      if (!mapping.source_event || e.sender.card == null) e.sender.card = e.sender.card || mapping.nickname
+      e.sender.card = e.sender.card ?? ''
     }
 
+    // 配对到原生 ICQQ 消息后，实时官方昵称/名片/头像仍优先于旧绑定资料。
+    if (e.qqbot_sender) {
+      Object.assign(e.sender, e.qqbot_sender)
+      if (e.message_type === 'group') {
+        e.member = {
+          ...e.member, ...e.qqbot_sender,
+          info: { ...e.member?.info, ...e.qqbot_sender },
+          ...(e.qqbot_sender.role ? {
+            is_owner: e.qqbot_sender.role === 'owner',
+            is_admin: ['owner', 'admin'].includes(e.qqbot_sender.role)
+          } : {})
+        }
+      }
+    }
     this.fillICQQIdentityFields(e, { qq, groupQQ, nickname: mapping.nickname })
     this.applyAtMappings(e, mentions)
     this.removeSelfAtSegment(e)
@@ -681,7 +736,7 @@ class QQBotIdMap {
     e.img = this.getImageUrls(e.message)
 
     if (qq) {
-      e.getAvatarUrl = (size = 0) => `https://q1.qlogo.cn/g?b=qq&s=${size}&nk=${qq}`
+      e.getAvatarUrl = (size = 0) => e.qqbot_sender?.avatar || e.sender?.avatar || `https://q1.qlogo.cn/g?b=qq&s=${size}&nk=${qq}`
     }
 
     if (isGroup) {
@@ -689,7 +744,7 @@ class QQBotIdMap {
       const qqbotGroup = e.group
       e.group = this.mergeApiObject(e.group, pickedGroup)
       // 消息仍来自 QQBot：这些接口必须保留原始 OpenID 场景，不能被原生 ICQQ 覆盖。
-      for (const method of ['sendCard', 'shareUrl', 'shareMusic', 'recallMsg', 'muteMember', 'getMsg', 'getChatHistory', 'getMemberMap', 'getMemberList',
+      for (const method of ['sendCard', 'shareUrl', 'shareMusic', 'getInfo', 'renew', 'recallMsg', 'muteMember', 'getMsg', 'getChatHistory', 'getMemberMap', 'getMemberList',
         'getMemberInfo', 'getMemberPage', 'pickMember', 'kickMember', 'removeMembers', 'getBlacklist',
         'getBlacklistPage', 'setMemberBlacklist', 'addToBlacklist', 'removeFromBlacklist']) {
         if (typeof qqbotGroup?.[method] === 'function') e.group[method] = qqbotGroup[method].bind(qqbotGroup)
@@ -717,6 +772,22 @@ class QQBotIdMap {
         return state.member_role === 'owner'
       }
       const officialGroup = Bot?.[qqbotSelfId]?.pickGroup?.(groupOpenid)
+      if (officialGroup?.getInfo) {
+        const info = () => ({ ...officialGroup.info, group_id: groupQQ })
+        for (const key of ['info', 'name', 'group_name', 'member_count', 'union_group_openid']) {
+          Object.defineProperty(e.group, key, { configurable: true, enumerable: true,
+            get: () => key === 'info' ? info() : info()[key === 'name' ? 'group_name' : key] })
+        }
+        for (const method of ['getInfo', 'renew']) {
+          e.group[method] = async (...args) => {
+            const value = await officialGroup[method](...args)
+            e.group_name = value.group_name || e.group_name
+            e.union_group_openid = value.union_group_openid || e.union_group_openid || ''
+            return { ...value, group_id: groupQQ }
+          }
+        }
+        if (info().union_group_openid) e.union_group_openid = info().union_group_openid
+      }
       if (officialGroup?.getMemberMap) {
         // 成员查询、踢人与黑名单始终由 QQBot 官方接口执行；身份转换不应路由到 ICQQ 网络。
         for (const method of ['getMemberMap', 'getMemberList', 'getMemberInfo', 'getMemberPage', 'pickMember',
@@ -732,8 +803,9 @@ class QQBotIdMap {
           for (const method of ['renew', 'getInfo']) {
             if (typeof officialMember[method] !== 'function') continue
             e.member[method] = async () => {
-              const info = await officialMember[method]()
+              const info = { ...await officialMember[method](), group_id: groupQQ, user_id: qq || e.member.user_id }
               e.member.info = info
+              for (const key of ['nickname', 'card', 'avatar', 'union_openid', 'role']) e.member[key] = info[key]
               e.member.is_owner = info.role === 'owner'
               e.member.is_admin = ['owner', 'admin'].includes(info.role)
               return info
@@ -769,6 +841,17 @@ class QQBotIdMap {
       e.friend = this.mergeApiObject(pickedFriend, e.friend)
       e.friend.user_id = qq
       e.friend.qqbot_user_id = e.qqbot_user_id || e.openid_user_id
+      const officialFriend = e.qqbot_bot?.pickFriend?.(e.user_openid || e.openid_user_id)
+      if (officialFriend?.getInfo) {
+        for (const key of ['info', 'nickname', 'avatar', 'union_openid', 'allow_proactive_msg']) {
+          Object.defineProperty(e.friend, key, { configurable: true, enumerable: true,
+            get: () => key === 'info' ? { ...officialFriend.info, user_id: qq } : officialFriend.info[key] })
+        }
+        for (const method of ['getInfo', 'getSimpleInfo', 'renew']) {
+          e.friend[method] = async (...args) => ({ ...await officialFriend[method](...args), user_id: qq })
+        }
+        e.friend.getAvatarUrl = officialFriend.getAvatarUrl
+      }
       if (typeof e.friend?.getChatHistory !== 'function') {
         e.friend.getChatHistory = async () => []
       }
@@ -833,7 +916,7 @@ class QQBotIdMap {
         raw: bot?.adapter || qqbotBot?.adapter
       }
       wrapper.qqbot_bot = qqbotBot || bot?.qqbot_bot || null
-      for (const method of ['sendGroupCard', 'sendPrivateCard', 'pickMember', 'getGroupMemberList', 'getGroupMemberInfo', 'setGroupKick',
+      for (const method of ['sendGroupCard', 'sendPrivateCard', 'getGroupInfo', 'getUserInfo', 'getFriendInfo', 'getStrangerInfo', 'pickMember', 'getGroupMemberList', 'getGroupMemberInfo', 'setGroupKick',
         'getGroupMemberPage', 'removeGroupMembers', 'getGroupBlacklist', 'getGroupBlacklistPage', 'setGroupMemberBlacklist']) {
         if (typeof qqbotBot?.[method] === 'function') wrapper[method] = qqbotBot[method].bind(qqbotBot)
       }
@@ -1391,11 +1474,13 @@ class QQBotIdMap {
       qqbot_user_id: user.user_openid,
       qqbot_group_id: groupOpenid
     }
+    member.avatar = userGroup.avatar || user.avatar || ''
+    member.union_openid = userGroup.union_openid || user.union_openid || ''
 
     member.is_admin = role === 'admin' || role === 'owner'
     member.is_owner = role === 'owner'
     member.info = { ...member }
-    member.getAvatarUrl = (size = 0) => `https://q1.qlogo.cn/g?b=qq&s=${size}&nk=${userId}`
+    member.getAvatarUrl = (size = 0) => member.avatar || `https://q1.qlogo.cn/g?b=qq&s=${size}&nk=${userId}`
     member.getInfo = async () => member.info
     member.sendMsg = async msg => Bot?.[qqSelfId]?.pickFriend?.(userId)?.sendMsg?.(msg)
     return member
@@ -1448,6 +1533,7 @@ class QQBotIdMap {
       if (groupQQ) {
         const group = {
           ...(Bot.gl?.get(groupQQ) || {}),
+          ...e.group?.info,
           group_id: groupQQ,
           uin: self_id,
           qqbot_group_id: openidGroupId
@@ -1465,12 +1551,17 @@ class QQBotIdMap {
       if (qq) {
         const user = {
           ...(Bot.fl?.get(qq) || {}),
+          ...e.qqbot_sender,
           user_id: qq,
           uin: self_id,
           qqbot_user_id: openidUserId
         }
         Bot.fl?.set(qq, user)
         Bot[self_id].fl?.set(qq, user)
+        if (groupQQ && e.member?.info && Bot[self_id].gml instanceof Map) {
+          if (!Bot[self_id].gml.has(groupQQ)) Bot[self_id].gml.set(groupQQ, new Map())
+          Bot[self_id].gml.get(groupQQ).set(qq, { ...e.member.info, user_id: qq, group_id: groupQQ })
+        }
       }
     } catch (error) {
       logger.debug('[QQBotIdMap]缓存Bot路由失败', error)

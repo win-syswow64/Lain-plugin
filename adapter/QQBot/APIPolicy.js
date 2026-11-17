@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 
 const messageContext = new AsyncLocalStorage()
 
-/** 官方标注仅白名单/内邀可用的接口（2026-10-21 核对 API v2 文档）。 */
+/** 官方标注仅白名单/内邀可用的接口（2026-11-17 核对 API v2 文档）。 */
 export const restrictedAPIs = [
   ['GET', '/v2/groups/{group_openid}/info', '获取群基本信息'],
   ['GET', '/v2/groups/{group_openid}/bot_state', '获取机器人群内状态'],
@@ -24,6 +24,7 @@ function getAPI (method, path) {
 }
 
 function getAPIName (method, pathname) {
+  if (/^\/v2\/users\/[^/]+\/info\/?$/.test(pathname)) return '获取用户基本信息'
   const material = pathname.match(/^\/v2\/media-images(?:\/(prepare|complete)|\/[^/]+\/delete)?\/?$/)
   if (material) return ({ prepare: '申请图片素材上传', complete: '完成图片素材上传' })[material[1]] ||
     (String(method).toUpperCase() === 'DELETE' ? '删除图片素材' : '查询图片素材')

@@ -18,6 +18,7 @@ import ImageMaterials, { IMAGE_MATERIAL_LIMIT, isMaterialURL } from './ImageMate
 import { normalizeImageHostResult } from './ImageHost.js'
 import { convertImageToWebP, withImageScope, createImageScope, clearImageScope, getImageScope } from './ImageConversion.js'
 import GroupMembers from './GroupMembers.js'
+import QQBotProfiles, { profileFields } from './Profiles.js'
 import { atTarget, isAtAll, normalizeMentions, hasAllMention, normalizeAllMentions } from './Mentions.js'
 import { withGroupAtAllLimit, sendWithAtAllLimit } from './AtAll.js'
 import QQBotCards, { isCardMessage } from './Card.js'
@@ -158,6 +159,10 @@ export default class adapterQQBot {
       makeForwardMsg: async (data) => await common.makeForwardMsg(data),
       getGroupMemberList: (groupId, noCache) => this.membersAPI.list(groupId, noCache),
       getGroupMemberInfo: (groupId, userId, noCache) => this.membersAPI.info(groupId, userId, noCache),
+      getGroupInfo: (groupId, noCache) => this.profilesAPI.query('group', groupId, noCache),
+      getUserInfo: (userId, noCache) => this.profilesAPI.query('user', userId, noCache),
+      getFriendInfo: (userId, noCache) => this.profilesAPI.query('user', userId, noCache),
+      getStrangerInfo: (userId, noCache) => this.profilesAPI.query('user', userId, noCache),
       setGroupKick: (groupId, userId, rejectAddRequest = false, message) => this.membersAPI.kick(groupId, userId, message, rejectAddRequest),
       getGroupMemberPage: (groupId, options) => this.membersAPI.page(groupId, options),
       removeGroupMembers: (groupId, users, block) => this.membersAPI.remove(groupId, users, block),
@@ -235,11 +240,13 @@ export default class adapterQQBot {
     }
 
     if (isGroup && groupId) {
-      if (isRobotChange && subType === 'increase') Bot[this.id]?.gl.set(groupId, { group_id: groupId })
+      this.profilesAPI.observeGroup(rawGroupId, data)
+      if (['increase', 'decrease'].includes(subType)) this.membersAPI.forget(rawGroupId, isRobotChange ? '' : rawUserId)
       if (isRobotChange && subType === 'decrease') {
         Bot[this.id]?.gl.delete(groupId)
         Bot[this.id]?.gml.delete(groupId)
         this.groupBotStateCache?.delete(this.stripQQBotId(rawGroupId))
+        this.profilesAPI.groups.delete(this.stripQQBotId(rawGroupId))
       }
       notice.group = this.pickGroup(rawGroupId)
       notice.group.group_id = groupId
@@ -257,8 +264,13 @@ export default class adapterQQBot {
       notice.reply = msg => notice.group.sendMsg(msg)
       QQBotIdMap.applyQQBotGroupNoticeMapping(notice)
     } else if (!isGroup && userId) {
-      if (subType === 'increase') Bot[this.id]?.fl.set(userId, { user_id: userId })
-      if (subType === 'decrease') Bot[this.id]?.fl.delete(userId)
+      if (subType === 'decrease') {
+        Bot[this.id]?.fl.delete(userId)
+        this.profilesAPI.users.delete(this.stripQQBotId(rawUserId))
+      } else {
+        const permission = subType === 'receive_open' ? true : subType === 'receive_close' ? false : undefined
+        this.profilesAPI.observeUser(rawUserId, { ...data, allow_proactive_msg: permission })
+      }
       const canReplyToEvent = subType === 'increase' || subType === 'receive_open'
       notice.friend = this.pickFriend(rawUserId, {
         messageId: '',
@@ -293,6 +305,7 @@ export default class adapterQQBot {
       : Math.floor(applyAt.getTime() / 1000)
     const verifyInfo = data.verify_info || {}
     const comment = verifyInfo.verify_message || data.comment || ''
+    this.profilesAPI.observeGroup(groupOpenid, data)
     const request = {
       ...data,
       raw: data,
@@ -369,22 +382,23 @@ export default class adapterQQBot {
   async gmlList(type = 'gl') {
     try {
       const List = await redis.keys(`lain:${type}:${this.id}:*`)
-      List.forEach(async i => {
-        const id = await redis.get(i)
-        const info = JSON.parse(id)
+      await Promise.all(List.map(async i => {
+        const info = JSON.parse(await redis.get(i))
+        if (!info) return
         info.uin = this.id
-        if (type === 'gl') {
-          Bot[this.id].gl.set(id, info)
-        } else {
-          Bot[this.id].fl.set(id, info)
-        }
-      })
+        const id = type === 'gl' ? info.group_id : info.user_id
+        if (id) Bot[this.id][type].set(id, info)
+      }))
     } catch { }
   }
 
   /** 群对象 */
   get membersAPI () {
     return this.groupMembersAPI ||= new GroupMembers(this)
+  }
+
+  get profilesAPI () {
+    return this.officialProfiles ||= new QQBotProfiles(this)
   }
 
   get materialsAPI () {
@@ -397,8 +411,16 @@ export default class adapterQQBot {
 
   pickGroup(groupID, source = {}) {
     const cardSource = typeof source === 'string' ? { messageId: source } : (source || {})
+    const profiles = this.profilesAPI
     return {
       group_id: this.formatQQBotId(groupID),
+      get info () { return profiles.groupInfo(groupID) },
+      get name () { return profiles.groupInfo(groupID).group_name },
+      get group_name () { return profiles.groupInfo(groupID).group_name },
+      get member_count () { return profiles.groupInfo(groupID).member_count },
+      get union_group_openid () { return profiles.groupInfo(groupID).union_group_openid },
+      getInfo: noCache => profiles.query('group', groupID, noCache),
+      renew: () => profiles.query('group', groupID, true),
       /** 查询机器人在群内是否为管理员；群主同时视为管理员。 */
       is_admin: async () => {
         const state = await this.getGroupBotState(groupID)
@@ -463,7 +485,17 @@ export default class adapterQQBot {
   pickFriend(userId, source = {}) {
     const sourceMessageId = source.messageId || source.msgId || source.id || ''
     const sourceEventId = source.eventId || ''
+    const profiles = this.profilesAPI
     return {
+      user_id: profiles.userInfo(userId).user_id,
+      get info () { return profiles.userInfo(userId) },
+      get nickname () { return profiles.userInfo(userId).nickname },
+      get avatar () { return profiles.userInfo(userId).avatar },
+      get union_openid () { return profiles.userInfo(userId).union_openid },
+      get allow_proactive_msg () { return profiles.userInfo(userId).allow_proactive_msg },
+      getInfo: noCache => profiles.query('user', userId, noCache),
+      getSimpleInfo: () => profiles.query('user', userId),
+      renew: () => profiles.query('user', userId, true),
       sendMsg: async (msg) => await this.sendFriendMsg(userId, msg, { messageId: sourceMessageId, eventId: sourceEventId }),
       sendCard: (card, options = {}) => this.sendCard('user', userId, card, { messageId: sourceMessageId, eventId: sourceEventId, ...options }),
       shareUrl: content => this.sendCard('user', userId, { type: 'share', data: content }, { messageId: sourceMessageId, eventId: sourceEventId }),
@@ -492,11 +524,14 @@ export default class adapterQQBot {
     const member = this.member(groupID, userID)
     // 保留旧版 .member 入口，同时支持 ICQQ 的 pickMember(...).renew()/kick()/mute()。
     const picked = { ...member, member }
-    for (const key of ['info', 'is_owner', 'is_admin', 'group_id', 'user_id']) {
+    for (const key of ['info', 'is_owner', 'is_admin', 'group_id', 'user_id', 'nickname', 'card', 'avatar', 'union_openid']) {
       Object.defineProperty(picked, key, {
         enumerable: true,
         get: () => member[key],
-        set: value => { member[key] = value }
+        set: value => {
+          if (['nickname', 'card', 'avatar', 'union_openid'].includes(key)) member.info[key] = value
+          else member[key] = value
+        }
       })
     }
     return picked
@@ -534,7 +569,7 @@ export default class adapterQQBot {
       is_admin: ['admin', 'owner'].includes(cached?.role),
       is_owner: cached?.role === 'owner',
       /** 获取头像 */
-      getAvatarUrl: (size = 0) => this.getAvatarUrl(size, userId),
+      getAvatarUrl: (size = 0) => member.info.avatar || this.getAvatarUrl(size, userId, groupId),
       /** 禁言当前成员；time 为秒数，传 0 可解除禁言。 */
       mute: async (time) => await this.setGroupMemberMute(groupId, userId, time),
       renew: () => update(true),
@@ -542,11 +577,16 @@ export default class adapterQQBot {
       kick: (message, block = false) => this.membersAPI.kick(groupId, userId, message, block),
       setBlacklist: (enabled = true) => this.membersAPI.setBlacklist(groupId, [userId], enabled)
     }
+    for (const key of ['nickname', 'card', 'avatar', 'union_openid']) {
+      Object.defineProperty(member, key, { enumerable: true, get: () => member.info[key] || '' })
+    }
     return member
   }
 
-  getAvatarUrl(size = 0, id) {
+  getAvatarUrl(size = 0, id, groupId) {
     const userId = String(id ?? '').trim()
+    const avatar = groupId ? this.membersAPI.peek(groupId, userId)?.avatar : this.profilesAPI.peekUser(userId).avatar
+    if (avatar) return avatar
     if (Number(userId)) return `https://q1.qlogo.cn/g?b=qq&s=${size}&nk=${userId}`
     return `https://q.qlogo.cn/qqapp/${this.id}/${this.stripQQBotId(userId)}/${size}`
   }
@@ -1315,13 +1355,24 @@ export default class adapterQQBot {
     const senderOpenid = this.getMessageUserOpenid(e)
     const senderMemberOpenid = this.getMessageMemberOpenid(e)
     const memberRole = this.getMemberRole(e)
-    const nickname = e.author?.username || e.sender?.user_name || e.sender?.nickname || e.user_id || ''
+    const official = profileFields(e.author)
+    const known = isGroup ? this.membersAPI.peek(rawGroupId, senderMemberOpenid) : this.profilesAPI.peekUser(senderOpenid)
+    const knownNickname = official.username || known?.nickname || known?.username || e.sender?.user_name || e.sender?.nickname || ''
+    const nickname = knownNickname || e.user_id || ''
+    const card = isGroup ? official.member_nickname ?? known?.card ?? '' : ''
+    const avatar = official.avatar || known?.avatar || ''
+    const unionOpenid = official.union_openid || known?.union_openid || ''
     const rawSender = {
       user_id: rawUserId,
       author_id: rawAuthorId,
       user_openid: e.author?.user_openid || e.sender?.user_openid || '',
       member_openid: senderMemberOpenid,
-      group_openid: e.group_openid || rawGroupId || ''
+      group_openid: e.group_openid || rawGroupId || '',
+      union_openid: unionOpenid,
+      union_group_openid: e.union_group_openid || '',
+      username: nickname,
+      member_nickname: card,
+      avatar
     }
     e.data = data
     e.post_type = 'message'
@@ -1330,6 +1381,13 @@ export default class adapterQQBot {
     e.qqbot_event_type = e.qqbot_event_type || data.qqbot_event_type || ''
     e.qqbot_event_id = e.event_id || data.event_id || ''
     e.time = data.timestamp
+    if (isGroup) {
+      this.profilesAPI.observeGroup(rawGroupId, e)
+      this.membersAPI.observe(rawGroupId, { ...official, member_openid: senderMemberOpenid }, e.time)
+      for (const mention of e.mentions || []) {
+        if (mention.scope !== 'all' && !mention.is_you) this.membersAPI.observe(rawGroupId, mention)
+      }
+    } else this.profilesAPI.observeUser(senderOpenid, official)
     e.self_id = this.id
     e.bot = Bot[this.id]
     e.sendMsg = data.reply
@@ -1428,7 +1486,7 @@ export default class adapterQQBot {
     /** 将收到的消息转为字符串 */
     e.toString = () => e.raw_message
     /** 获取对应用户头像 */
-    e.getAvatarUrl = (size = 0) => this.getAvatarUrl(size, senderOpenid)
+    e.getAvatarUrl = (size = 0) => avatar || this.getAvatarUrl(size, senderOpenid, isGroup ? rawGroupId : undefined)
 
     /** 构建场景对应的方法 */
     if (isGroup) {
@@ -1436,13 +1494,13 @@ export default class adapterQQBot {
         const groupId = `${this.id}-${e.group_id}`
         if (!Bot[e.self_id].gl.get(groupId)) Bot[e.self_id].gl.set(groupId, { group_id: groupId })
         /** 缓存群列表 */
-        if (await redis.get(`lain:gl:${e.self_id}:${groupId}`)) redis.set(`lain:gl:${e.self_id}:${groupId}`, JSON.stringify({ group_id: groupId, uin: this.id }))
+        await redis.set(`lain:gl:${e.self_id}:${groupId}`, JSON.stringify({ ...Bot[this.id].gl.get(groupId), group_id: groupId, uin: this.id }))
       } catch { }
 
       e.member = this.member(e.group_id, e.user_id)
       e.member.is_owner = memberRole === 'owner'
       e.member.is_admin = memberRole === 'admin' || memberRole === 'owner'
-      e.group_name = `${this.id}-${e.group_id}`
+      e.group_name = this.profilesAPI.groupInfo(rawGroupId).group_name || `${this.id}-${e.group_id}`
       e.group = this.pickGroup(e.group_id, { messageId: e.qqbot_message_id || e.message_id || data.id, eventId: e.qqbot_event_id })
       e.message_type = 'group'
       e.sub_type = 'normal'
@@ -1463,6 +1521,7 @@ export default class adapterQQBot {
     e.user_openid = senderOpenid
     e.member_openid = senderMemberOpenid
     e.group_openid = rawGroupId || ''
+    e.union_openid = unionOpenid
     e.raw_sender = rawSender
     if (!e.sender) e.sender = {}
     e.sender.user_id = e.user_id
@@ -1470,10 +1529,22 @@ export default class adapterQQBot {
     e.sender.member_openid = senderMemberOpenid
     e.sender.group_openid = rawGroupId
     e.sender.nickname = nickname
-    e.sender.card = nickname
+    e.sender.card = card
+    e.sender.member_nickname = card
+    e.sender.avatar = avatar
+    e.sender.union_openid = unionOpenid
+    if (typeof official.bot === 'boolean') e.sender.is_robot = official.bot
     e.sender.role = memberRole
     e.sender.title = e.sender.title || ''
     e.sender.level = e.sender.level || 1
+    // 身份转译可能借用原生 ICQQ 事件形状，保留官方实时资料的独立快照。
+    e.qqbot_sender = {
+      ...(knownNickname ? { nickname: knownNickname } : {}),
+      ...(!isGroup || official.member_nickname !== undefined || known?.card ? { card, member_nickname: card } : {}),
+      ...(avatar ? { avatar } : {}),
+      ...(unionOpenid ? { union_openid: unionOpenid } : {}),
+      ...(official.member_role ? { role: official.member_role } : {})
+    }
     if (e.member?.info) {
       e.member.info = { ...e.member.info, ...e.sender }
       e.member.info.group_id = e.group_id
@@ -1481,8 +1552,10 @@ export default class adapterQQBot {
     }
 
     /** 缓存好友列表 */
-    if (!Bot[e.self_id].fl.get(e.user_id)) Bot[e.self_id].fl.set(e.user_id, { user_id: e.user_id })
-    if (await redis.get(`lain:fl:${e.self_id}:${e.user_id}`)) redis.set(`lain:fl:${e.self_id}:${e.user_id}`, JSON.stringify({ user_id: e.user_id }))
+    Bot[e.self_id].fl.set(e.user_id, { ...Bot[e.self_id].fl.get(e.user_id), ...e.sender, user_id: e.user_id })
+    try {
+      await redis.set(`lain:fl:${e.self_id}:${e.user_id}`, JSON.stringify(Bot[e.self_id].fl.get(e.user_id)))
+    } catch { }
 
     /** 保存消息次数 */
     try { common.recvMsg(e.self_id, e.adapter) } catch { }

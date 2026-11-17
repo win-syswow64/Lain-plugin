@@ -52,7 +52,9 @@ export function normalizeMentions (message, mentions = []) {
   for (const item of message) {
     if (item?.type === 'at') {
       const id = isAtAll(item) ? 'all' : atTarget(item)
-      result.push({ ...item, qq: id, id, user_id: id, text: item.text || (id === 'all' ? '@全体成员' : '') })
+      const member = mentions.find(user => [user.id, user.member_openid, user.user_openid].includes(id))
+      const nickname = member?.member_nickname || item.member_nickname || member?.username || item.username
+      result.push({ ...item, qq: id, id, user_id: id, text: item.text || (id === 'all' ? '@全体成员' : nickname ? `@${nickname}` : '') })
       continue
     }
     if (item?.type !== 'text') { result.push(item); continue }
@@ -62,7 +64,8 @@ export function normalizeMentions (message, mentions = []) {
       if (match.index > offset) result.push({ type: 'text', text: text.slice(offset, match.index) })
       const id = ['all', 'everyone'].includes(match[1]) ? 'all' : match[1]
       const member = mentions.find(user => [user.id, user.member_openid, user.user_openid].includes(id))
-      result.push({ type: 'at', qq: id, id, user_id: id, text: id === 'all' ? '@全体成员' : member?.username ? `@${member.username}` : '' })
+      const nickname = member?.member_nickname || member?.username
+      result.push({ type: 'at', qq: id, id, user_id: id, text: id === 'all' ? '@全体成员' : nickname ? `@${nickname}` : '' })
       offset = match.index + match[0].length
     }
     if (!offset) result.push(item)
